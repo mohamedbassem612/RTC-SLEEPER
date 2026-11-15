@@ -56,14 +56,44 @@ class InterfaceTests : public QObject {
         QTemporaryDir d;
         FakeClient c;
         Window w(c, d.filePath("prefs.ini"));
-        auto *now = w.findChild<QCheckBox *>("sleepNow");
+        auto *now = w.findChild<ToggleSwitch *>("sleepNow");
         auto *row = w.findChild<QWidget *>("sleepAtRow");
         now->setChecked(true);
         QVERIFY(!row->isEnabled());
         QVERIFY(!w.findChild<QSpinBox *>("sleepAtHour")->isEnabled());
+        QVERIFY(!w.findChild<ToggleSwitch *>("repeatDay0")->isEnabled());
         now->setChecked(false);
         QVERIFY(row->isEnabled());
         QCOMPARE(w.minimumSize(), w.maximumSize());
+    }
+    void togglesAnimateAndSupportKeyboard() {
+        ToggleSwitch toggle;
+        toggle.show();
+        QTest::qWait(20);
+        QCOMPARE(toggle.thumbPosition(), 0.0);
+        QTest::mouseClick(&toggle, Qt::LeftButton);
+        QVERIFY(toggle.isChecked());
+        QTest::qWait(80);
+        QVERIFY(toggle.thumbPosition() > 0.0 && toggle.thumbPosition() < 1.0);
+        QTest::qWait(140);
+        QCOMPARE(toggle.thumbPosition(), 1.0);
+        QTest::keyClick(&toggle, Qt::Key_Space);
+        QVERIFY(!toggle.isChecked());
+        QTest::qWait(220);
+        QCOMPARE(toggle.thumbPosition(), 0.0);
+        QTest::mouseClick(&toggle, Qt::LeftButton);
+        QTest::qWait(60);
+        auto beforeReverse = toggle.thumbPosition();
+        QTest::mouseClick(&toggle, Qt::LeftButton);
+        QCOMPARE(toggle.thumbPosition(), beforeReverse);
+        QTest::qWait(220);
+        QCOMPARE(toggle.thumbPosition(), 0.0);
+        toggle.setEnabled(false);
+        QTest::mouseClick(&toggle, Qt::LeftButton);
+        QVERIFY(!toggle.isChecked());
+        toggle.hide();
+        toggle.setChecked(true);
+        QCOMPARE(toggle.thumbPosition(), 1.0);
     }
     void arrowsStepAndAnimate() {
         TimeInput t("test");
@@ -178,8 +208,8 @@ class InterfaceTests : public QObject {
         w.show();
         QTest::qWait(40);
         QVERIFY(w.grab().save("preview-idle.png"));
-        w.findChild<QCheckBox *>("sleepNow")->setChecked(true);
-        QTest::qWait(40);
+        w.findChild<ToggleSwitch *>("sleepNow")->setChecked(true);
+        QTest::qWait(220);
         QVERIFY(w.grab().save("preview-now.png"));
         c.activate();
         w.refresh();

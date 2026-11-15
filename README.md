@@ -10,6 +10,7 @@ The original working Python/GTK release is preserved on the [`python-version`](h
 
 - Fixed 1000 × 720 desktop window, black backgrounds and white accents.
 - English by default; Arabic and activity logs in Settings.
+- Horizontal animated toggle switches for Sleep Now and repeat weekdays, with keyboard support and mirrored RTL layout.
 - Sleep Now or a future sleep time, plus a wake time and optional weekday repeat.
 - Entire Sleep at row disabled and dimmed when Sleep Now is enabled.
 - Separate hour/minute controls: GUI hours are restricted to **1–12 with AM/PM**, minutes to 0–59. The engine independently validates 24-hour CLI input.

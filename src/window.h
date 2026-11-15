@@ -1,6 +1,6 @@
 #pragma once
 #include "client.h"
-#include <QCheckBox>
+#include <QAbstractButton>
 #include <QComboBox>
 #include <QFrame>
 #include <QLabel>
@@ -8,9 +8,26 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QVariantAnimation>
 #include <QWidget>
 #include <functional>
 namespace Sleeper {
+class ToggleSwitch : public QAbstractButton {
+    Q_OBJECT
+    qreal position_ = 0;
+    QVariantAnimation animation_;
+
+  protected:
+    void paintEvent(QPaintEvent *) override;
+    void hideEvent(QHideEvent *) override;
+
+  public:
+    explicit ToggleSwitch(QWidget *parent = nullptr);
+    QSize sizeHint() const override;
+    qreal thumbPosition() const {
+        return position_;
+    }
+};
 class TimeInput : public QFrame {
   public:
     QSpinBox *hour, *minute;
@@ -28,8 +45,8 @@ class Window : public QWidget {
     QStackedWidget *pages_{};
     QWidget *form_{}, *dashboard_{}, *sleepRow_{}, *repeatRow_{};
     TimeInput *sleep_{}, *wake_{};
-    QCheckBox *now_{};
-    QList<QCheckBox *> days_;
+    ToggleSwitch *now_{};
+    QList<ToggleSwitch *> days_;
     QLabel *duration_{}, *countdown_{}, *summary_{}, *badge_{}, *ringText_{}, *next_{};
     QPushButton *cancelEdit_{}, *pause_{};
     QString text(QString en, QString ar) const;

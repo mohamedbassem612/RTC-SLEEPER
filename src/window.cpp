@@ -227,10 +227,6 @@ QPushButton:disabled {color: #555; background: #080808; border-color: #222;}
 QSpinBox,QComboBox {background: #161616; border: 1px solid #444; border-radius: 9px; padding: 8px; min-height: 28px; font-size: 21px;}
 QSpinBox:disabled,QComboBox:disabled {background: #080808; color: #444; border-color: #222;}
 QLabel:disabled {color: #777;}
-QCheckBox {spacing: 9px; background: transparent;}
-QCheckBox::indicator {width: 19px; height: 19px; border: 1px solid #666; border-radius: 5px; background: #111;}
-QCheckBox::indicator:checked {background: #eee; border: 4px solid #777;}
-QCheckBox:disabled {color:#444;}
 QTextEdit {background:#080808; color:#ddd; border:1px solid #333; border-radius:10px; padding:10px; font-family:monospace; font-size:12px;}
 QDialog {background:#000;}
 QToolTip {background:#222; color:#fff; border:1px solid #555;}
@@ -240,6 +236,59 @@ QToolButton:pressed {background:#454545; border-color:#eee;}
 QToolButton:disabled {background:#080808; border-color:#222;}
 )";
 } // namespace
+ToggleSwitch::ToggleSwitch(QWidget *parent) : QAbstractButton(parent) {
+    setCheckable(true);
+    setFocusPolicy(Qt::StrongFocus);
+    setCursor(Qt::PointingHandCursor);
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    animation_.setDuration(180);
+    animation_.setEasingCurve(QEasingCurve::InOutCubic);
+    connect(&animation_, &QVariantAnimation::valueChanged, this, [this](QVariant value) {
+        position_ = value.toReal();
+        update();
+    });
+    connect(this, &QAbstractButton::toggled, this, [this](bool on) {
+        animation_.stop();
+        const qreal target = on ? 1.0 : 0.0;
+        if (!isVisible()) {
+            position_ = target;
+            update();
+            return;
+        }
+        animation_.setStartValue(position_);
+        animation_.setEndValue(target);
+        animation_.start();
+    });
+}
+QSize ToggleSwitch::sizeHint() const {
+    return QSize(56, 32);
+}
+void ToggleSwitch::hideEvent(QHideEvent *event) {
+    animation_.stop();
+    position_ = isChecked() ? 1.0 : 0.0;
+    QAbstractButton::hideEvent(event);
+}
+void ToggleSwitch::paintEvent(QPaintEvent *) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const QRectF track(2, (height() - 28) / 2.0, width() - 4, 28);
+    const int shade = qRound(30 + position_ * 195);
+    p.setPen(QPen(isEnabled() ? QColor("#666666") : QColor("#333333"), 1));
+    p.setBrush(isEnabled() ? QColor(shade, shade, shade) : QColor("#171717"));
+    p.drawRoundedRect(track, 14, 14);
+    // The thumb always travels horizontally; RTL mirrors which side is on.
+    const qreal position = layoutDirection() == Qt::RightToLeft ? 1.0 - position_ : position_;
+    const qreal x = track.left() + 4 + position * (track.width() - 28);
+    const int thumb = qRound(245 - position_ * 220);
+    p.setPen(Qt::NoPen);
+    p.setBrush(isEnabled() ? QColor(thumb, thumb, thumb) : QColor("#555555"));
+    p.drawEllipse(QRectF(x, track.top() + 4, 20, 20));
+    if (hasFocus()) {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor("#aaaaaa"), 1, Qt::DotLine));
+        p.drawRoundedRect(track.adjusted(-2, -2, 2, 2), 16, 16);
+    }
+}
 TimeInput::TimeInput(QString name, QWidget *parent) : QFrame(parent) {
     setObjectName(name);
     // Keep numeric clock sections in HH:MM order in both interface languages.
@@ -390,10 +439,11 @@ QWidget *Window::makeForm() {
     auto *n = card(text("☾  Sleep Now", "☾  السكون الآن"),
                    text("Verify wake time, then sleep in 5 seconds.",
                         "تحقق من موعد الإيقاظ، ثم ادخل السكون بعد 5 ثوانٍ."));
-    now_ = new QCheckBox;
+    now_ = new ToggleSwitch;
     now_->setObjectName("sleepNow");
+    now_->setAccessibleName(text("Sleep Now", "السكون الآن"));
     n->addWidget(now_);
-    connect(now_, &QCheckBox::toggled, this, [this] { updateForm(); });
+    connect(now_, &QAbstractButton::toggled, this, [this] { updateForm(); });
     auto *s = card(text("Sleep at", "السكون الساعة"), "");
     sleepRow_ = s->parentWidget();
     sleepRow_->setObjectName("sleepAtRow");
@@ -407,11 +457,20 @@ QWidget *Window::makeForm() {
     auto en = QStringList{"M", "T", "W", "T", "F", "S", "S"};
     auto ar = QStringList{"إثن", "ثلا", "أرب", "خمي", "جمع", "سبت", "أحد"};
     for (int i = 0; i < 7; i++) {
-        auto *d = new QCheckBox(arabic_ ? ar[i] : en[i]);
-        d->setToolTip(QLocale(QLocale::English).dayName(i + 1));
+        auto *d = new ToggleSwitch;
+        d->setObjectName(QString("repeatDay%1").arg(i));
+        auto dayName = QLocale(arabic_ ? QLocale::Arabic : QLocale::English).dayName(i + 1);
+        d->setToolTip(dayName);
+        d->setAccessibleName(dayName);
         days_.append(d);
-        repeat->addWidget(d);
-        connect(d, &QCheckBox::toggled, this, [this] { updateForm(); });
+        auto *day = new QVBoxLayout;
+        day->setSpacing(4);
+        auto *caption = label(arabic_ ? ar[i] : en[i], "muted");
+        caption->setAlignment(Qt::AlignCenter);
+        day->addWidget(caption);
+        day->addWidget(d);
+        repeat->addLayout(day);
+        connect(d, &QAbstractButton::toggled, this, [this] { updateForm(); });
     }
     auto *d = card(text("Sleep duration", "مدة السكون"), "");
     duration_ = label("", "duration");
