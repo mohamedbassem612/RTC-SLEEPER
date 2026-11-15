@@ -195,7 +195,13 @@ class Window(Gtk.Window):
         self.set_size_request(1000,720)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_from_file(str(Path(__file__).with_name('icon.svg')))
+        # Some minimal Linux images omit the GdkPixbuf SVG loader. The desktop
+        # entry still uses the installed scalable icon; a missing window-icon
+        # loader must not prevent the scheduler UI from starting.
+        try:
+            self.set_icon_from_file(str(Path(__file__).with_name('icon.svg')))
+        except GLib.Error:
+            pass
         self.connect('destroy', lambda *_: Gtk.main_quit() if Gtk.main_level() else None)
         self.settings = {'language':'en'}
         if PREFS.exists():
