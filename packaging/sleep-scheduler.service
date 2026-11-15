@@ -1,0 +1,13 @@
+[Unit]
+Description=RTC Sleeper C++ verified sleep scheduling engine
+After=time-sync.target
+[Service]
+Type=simple
+ExecStart=/usr/lib/rtc-sleeper/sleep-scheduler --daemon
+Restart=on-failure
+RestartSec=3
+UMask=0022
+Environment=QT_PLUGIN_PATH=
+Environment=QT_QPA_PLATFORM_PLUGIN_PATH=
+[Install]
+WantedBy=multi-user.target

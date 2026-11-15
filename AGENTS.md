@@ -55,7 +55,9 @@ The root system-sleep post hook resets the current cycle on every system resume,
 
 ## Installation and verification
 
-Installed engine: `/opt/sleep-scheduler/engine.py`. State and rotated logs: `/var/lib/sleep-scheduler/`. System service: `sleep-scheduler.service`. The passwordless privilege applies only to `/usr/local/libexec/sleep-scheduler-control`, which accepts validated scheduling operations; it does not grant general sudo access.
+This branch is the C++17 / Qt 6 implementation. The original Python implementation is preserved on the `python-version` branch. Installed engine: `/usr/lib/rtc-sleeper/sleep-scheduler`. State and rotated logs: `/var/lib/sleep-scheduler/`. System service: `sleep-scheduler.service`. The passwordless privilege applies only to `/usr/local/libexec/sleep-scheduler-control`, which accepts one validated JSON scheduling request; it does not grant general sudo access. Use `cmake -S . -B build -G Ninja`, `cmake --build build`, and `ctest --test-dir build --output-on-failure` to build and run tests with fake hardware. Install with `sudo bash scripts/install.sh build/sleep-scheduler`.
+
+GUI time inputs use hours 1–12 and AM/PM; CLI inputs remain 24-hour HH:MM. Remove keeps the last accepted user selections. Cancel Editing discards only the unsubmitted draft; it must not cancel or modify the active schedule. Preferences are separate from authoritative engine state. After resume, reset the cycle while preserving saved UI selections.
 
 Read-only checks:
 

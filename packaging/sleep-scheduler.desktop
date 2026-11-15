@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RTC Sleeper
+Name[ar]=RTC Sleeper — جدولة السكون
+Comment=Verified sleep and wake schedules
+Exec=/usr/local/bin/sleep-scheduler
+Icon=sleep-scheduler
+Terminal=false
+Categories=Utility;
+StartupNotify=true
