@@ -1,6 +1,8 @@
 #include "window.h"
+#include <QElapsedTimer>
 #include <QLineEdit>
 #include <QTemporaryDir>
+#include <QToolButton>
 #include <QtTest>
 using namespace Sleeper;
 class FakeClient : public Client {
@@ -62,6 +64,67 @@ class InterfaceTests : public QObject {
         now->setChecked(false);
         QVERIFY(row->isEnabled());
         QCOMPARE(w.minimumSize(), w.maximumSize());
+    }
+    void arrowsStepAndAnimate() {
+        TimeInput t("test");
+        t.setValue("07:20");
+        t.show();
+        QTest::qWait(20);
+        auto *hourUp = t.findChild<QToolButton *>("testHourIncrease");
+        auto *hourDown = t.findChild<QToolButton *>("testHourDecrease");
+        auto *minuteUp = t.findChild<QToolButton *>("testMinuteIncrease");
+        auto *minuteDown = t.findChild<QToolButton *>("testMinuteDecrease");
+        QVERIFY(hourUp && hourDown && minuteUp && minuteDown);
+        QTest::mouseClick(hourUp, Qt::LeftButton);
+        QCOMPARE(t.hour->value(), 8);
+        auto *animation = t.hour->findChild<QWidget *>("testHourDigitAnimation");
+        QVERIFY(animation && animation->isVisible());
+        QTest::qWait(160);
+        QVERIFY(!animation->isVisible());
+        QTest::mouseClick(hourDown, Qt::LeftButton);
+        QCOMPARE(t.hour->value(), 7);
+        QTest::mouseClick(minuteUp, Qt::LeftButton);
+        QCOMPARE(t.minute->value(), 21);
+        QTest::mouseClick(minuteDown, Qt::LeftButton);
+        QCOMPARE(t.minute->value(), 20);
+        t.hour->setValue(12);
+        QTest::mouseClick(hourUp, Qt::LeftButton);
+        QCOMPARE(t.hour->value(), 1);
+        t.minute->setValue(0);
+        QTest::mouseClick(minuteDown, Qt::LeftButton);
+        QCOMPARE(t.minute->value(), 59);
+    }
+    void holdAcceleratesWithinLimitAndStops() {
+        TimeInput t("test");
+        t.setValue("07:10");
+        t.show();
+        QTest::qWait(20);
+        auto *up = t.findChild<QToolButton *>("testMinuteIncrease");
+        QVector<qint64> times;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        connect(t.minute, &QSpinBox::valueChanged, this, [&] { times.append(elapsed.elapsed()); });
+        QTest::mousePress(up, Qt::LeftButton);
+        QTest::qWait(4100);
+        QTest::mouseRelease(up, Qt::LeftButton);
+        QVERIFY(times.size() >= 12 && times.size() <= 30);
+        QVERIFY(times[1] - times[0] >= 350); // initial hold delay
+        for (int i = 2; i < times.size(); ++i)
+            QVERIFY2(times[i] - times[i - 1] >= 125, "Hold exceeded the maximum repeat speed");
+        QVERIFY(times[2] - times[1] > times.last() - times[times.size() - 2]);
+        int stopped = t.minute->value();
+        QTest::qWait(450);
+        QCOMPARE(t.minute->value(), stopped);
+        auto *down = t.findChild<QToolButton *>("testMinuteDecrease");
+        QTest::mousePress(down, Qt::LeftButton);
+        QTest::qWait(480);
+        QTest::mouseRelease(down, Qt::LeftButton);
+        QCOMPARE(t.minute->value(), stopped - 2);
+        QTest::mousePress(up, Qt::LeftButton);
+        t.setEnabled(false);
+        stopped = t.minute->value();
+        QTest::qWait(500);
+        QCOMPARE(t.minute->value(), stopped);
     }
     void removePreservesTimes() {
         QTemporaryDir d;

@@ -3,9 +3,11 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QElapsedTimer>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QJsonDocument>
+#include <QLineEdit>
 #include <QLocale>
 #include <QMessageBox>
 #include <QPainter>
@@ -14,16 +16,160 @@
 #include <QStandardPaths>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
+#include <QVariantAnimation>
 
 namespace Sleeper {
 namespace {
+class DigitAnimation : public QWidget {
+  public:
+    QString previous, next;
+    qreal progress = 0;
+    int direction = 1;
+    explicit DigitAnimation(QWidget *parent) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        hide();
+    }
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::TextAntialiasing);
+        p.fillRect(rect(), QColor("#161616"));
+        p.setClipRect(rect());
+        p.setPen(QColor("#f5f5f5"));
+        p.setFont(font());
+        auto previousRect = QRectF(rect()).translated(0, -direction * progress * height());
+        auto nextRect = previousRect.translated(0, direction * height());
+        p.drawText(previousRect, Qt::AlignCenter, previous);
+        p.drawText(nextRect, Qt::AlignCenter, next);
+    }
+};
 class TwoDigitSpin : public QSpinBox {
+    int previous_ = 0, stepDirection_ = 0;
+    DigitAnimation *overlay_;
+    QVariantAnimation animation_;
+
+  public:
+    TwoDigitSpin() : overlay_(new DigitAnimation(this)) {
+        setButtonSymbols(QAbstractSpinBox::NoButtons);
+        setAlignment(Qt::AlignCenter);
+        animation_.setDuration(115);
+        animation_.setStartValue(0.0);
+        animation_.setEndValue(1.0);
+        animation_.setEasingCurve(QEasingCurve::OutCubic);
+        connect(&animation_, &QVariantAnimation::valueChanged, this, [this](QVariant value) {
+            overlay_->progress = value.toReal();
+            overlay_->update();
+        });
+        connect(&animation_, &QVariantAnimation::finished, overlay_, &QWidget::hide);
+        connect(this, &QSpinBox::valueChanged, this, [this](int value) {
+            const int old = previous_;
+            previous_ = value;
+            if (!isVisible() || !isEnabled())
+                return;
+            animation_.stop();
+            overlay_->setObjectName(objectName() + "DigitAnimation");
+            overlay_->setGeometry(lineEdit()->geometry());
+            overlay_->setFont(lineEdit()->font());
+            overlay_->previous = textFromValue(old);
+            overlay_->next = textFromValue(value);
+            overlay_->direction = stepDirection_ ? stepDirection_ : (value > old ? 1 : -1);
+            overlay_->progress = 0;
+            overlay_->show();
+            overlay_->raise();
+            animation_.start();
+        });
+    }
+
   protected:
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::Hide ||
+            (event->type() == QEvent::EnabledChange && !isEnabled())) {
+            animation_.stop();
+            overlay_->hide();
+        }
+        return QSpinBox::event(event);
+    }
+    void stepBy(int steps) override {
+        stepDirection_ = steps >= 0 ? 1 : -1;
+        QSpinBox::stepBy(steps);
+        stepDirection_ = 0;
+    }
     QString textFromValue(int value) const override {
         return QString::number(value).rightJustified(2, '0');
     }
 };
+class HoldArrow : public QToolButton {
+    QTimer repeat_;
+    QElapsedTimer held_;
+    QSpinBox *field_;
+    int direction_;
+    void step() {
+        if (direction_ > 0)
+            field_->stepUp();
+        else
+            field_->stepDown();
+    }
+
+  public:
+    HoldArrow(QSpinBox *field, int direction) : field_(field), direction_(direction) {
+        setFixedSize(36, 23);
+        setCursor(Qt::PointingHandCursor);
+        setAutoRepeat(false);
+        setObjectName(field->objectName() + (direction > 0 ? "Increase" : "Decrease"));
+        const auto description = direction > 0 ? "Increase / زيادة" : "Decrease / تقليل";
+        setToolTip(description);
+        setAccessibleName(description);
+        repeat_.setTimerType(Qt::PreciseTimer);
+        connect(this, &QToolButton::pressed, this, [this] {
+            held_.start();
+            step();
+            repeat_.start(400);
+        });
+        connect(this, &QToolButton::released, &repeat_, &QTimer::stop);
+        connect(&repeat_, &QTimer::timeout, this, [this] {
+            if (!isDown() || !isEnabled() || !isVisible()) {
+                repeat_.stop();
+                return;
+            }
+            step();
+            // Ramp gently from about 4 steps/s to a hard cap of 7 steps/s.
+            repeat_.start(qMax(140, 280 - int(held_.elapsed() / 25)));
+        });
+    }
+
+  protected:
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::Hide || event->type() == QEvent::UngrabMouse ||
+            (event->type() == QEvent::EnabledChange && !isEnabled()))
+            repeat_.stop();
+        return QToolButton::event(event);
+    }
+    void paintEvent(QPaintEvent *event) override {
+        QToolButton::paintEvent(event);
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(QPen(isEnabled() ? QColor("#eeeeee") : QColor("#444444"), 1.8, Qt::SolidLine,
+                      Qt::RoundCap, Qt::RoundJoin));
+        const qreal middle = height() / 2.0;
+        const qreal tip = middle - direction_ * 3;
+        const qreal edge = middle + direction_ * 3;
+        p.drawPolyline(QPolygonF{QPointF(12, edge), QPointF(18, tip), QPointF(24, edge)});
+    }
+};
+QWidget *steppingField(QSpinBox *field) {
+    auto *container = new QWidget;
+    auto *column = new QVBoxLayout(container);
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(3);
+    auto *arrows = new QHBoxLayout;
+    arrows->setSpacing(6);
+    arrows->addWidget(new HoldArrow(field, 1));
+    arrows->addWidget(new HoldArrow(field, -1));
+    column->addLayout(arrows);
+    column->addWidget(field);
+    return container;
+}
 QLabel *label(QString s, QString role = "", QWidget *parent = nullptr) {
     auto *l = new QLabel(s, parent);
     l->setProperty("role", role);
@@ -88,6 +234,10 @@ QCheckBox:disabled {color:#444;}
 QTextEdit {background:#080808; color:#ddd; border:1px solid #333; border-radius:10px; padding:10px; font-family:monospace; font-size:12px;}
 QDialog {background:#000;}
 QToolTip {background:#222; color:#fff; border:1px solid #555;}
+QToolButton {background:#151515; border:1px solid #444; border-radius:6px; padding:0;}
+QToolButton:hover {background:#303030; border-color:#999;}
+QToolButton:pressed {background:#454545; border-color:#eee;}
+QToolButton:disabled {background:#080808; border-color:#222;}
 )";
 } // namespace
 TimeInput::TimeInput(QString name, QWidget *parent) : QFrame(parent) {
@@ -113,9 +263,9 @@ TimeInput::TimeInput(QString name, QWidget *parent) : QFrame(parent) {
     period = new QComboBox;
     period->addItems({"AM", "PM"});
     period->setFixedWidth(85);
-    l->addWidget(hour);
+    l->addWidget(steppingField(hour));
     l->addWidget(label(":"));
-    l->addWidget(minute);
+    l->addWidget(steppingField(minute));
     l->addWidget(period);
     for (auto *s : {hour, minute})
         connect(s, &QSpinBox::valueChanged, this, [this] {
@@ -222,12 +372,12 @@ QWidget *Window::makeForm() {
     auto *w = new QWidget;
     auto *l = new QVBoxLayout(w);
     l->setContentsMargins(0, 0, 0, 0);
-    l->setSpacing(13);
+    l->setSpacing(10);
     auto card = [&](QString title, QString hint) -> QHBoxLayout * {
         auto *f = new QFrame;
         f->setProperty("role", "card");
         auto *row = new QHBoxLayout(f);
-        row->setContentsMargins(22, 16, 22, 16);
+        row->setContentsMargins(22, 12, 22, 12);
         auto *words = new QVBoxLayout;
         words->addWidget(label(title, "heading"));
         if (!hint.isEmpty())
@@ -377,12 +527,6 @@ void Window::updateForm() {
         return;
     sleepRow_->setEnabled(!now_->isChecked());
     repeatRow_->setEnabled(!now_->isChecked());
-    auto *effect = qobject_cast<QGraphicsOpacityEffect *>(sleepRow_->graphicsEffect());
-    if (!effect) {
-        effect = new QGraphicsOpacityEffect(sleepRow_);
-        sleepRow_->setGraphicsEffect(effect);
-    }
-    effect->setOpacity(now_->isChecked() ? 0.55 : 1.0);
     try {
         auto c = nextCycle(config(), QDateTime::currentSecsSinceEpoch());
         duration_->setText(remaining(c.second - c.first, arabic_, false));

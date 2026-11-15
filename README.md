@@ -13,6 +13,7 @@ The original working Python/GTK release is preserved on the [`python-version`](h
 - Sleep Now or a future sleep time, plus a wake time and optional weekday repeat.
 - Entire Sleep at row disabled and dimmed when Sleep Now is enabled.
 - Separate hour/minute controls: GUI hours are restricted to **1–12 with AM/PM**, minutes to 0–59. The engine independently validates 24-hour CLI input.
+- Visible increase/decrease arrows above each numeric field, with animated digits. Holding an arrow repeats after 400 ms, accelerates gradually and caps at one step every 140 ms (about 7 steps per second). Releasing or disabling the control stops repetition.
 - Animated transition to the active schedule screen, with a live **Will sleep in:** countdown. The countdown is the time until scheduled suspend; it is separate from sleep duration.
 - Edit Schedule, **Cancel Editing**, Pause/Resume and Remove.
 - Remove preserves the last accepted time selections, including after closing and reopening the app. Cancel Editing discards the draft without changing the active schedule.
