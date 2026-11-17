@@ -86,12 +86,18 @@ jobs:
       - name: Start Android 11 emulator and test embedded network startup
         timeout-minutes: 12
         run: |
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/rtc-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          trap 'cat "$RUNNER_TEMP/rtc-emulator.log" 2>/dev/null || true' ERR
           sdkmanager_path="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)"
           "$sdkmanager_path" 'emulator' 'system-images;android-30;default;x86_64'
           avdmanager_path="$(dirname "$sdkmanager_path")/avdmanager"
-          echo no | "$avdmanager_path" create avd -n rtc-network-test -k 'system-images;android-30;default;x86_64'
+          echo no | "$avdmanager_path" create avd -n rtc-network-test -k 'system-images;android-30;default;x86_64' -d 'Nexus S'
           sudo chmod 666 /dev/kvm
-          "$ANDROID_HOME/emulator/emulator" -avd rtc-network-test -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 -cores 2 >"$RUNNER_TEMP/rtc-emulator.log" 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd rtc-network-test -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -feature -Vulkan -memory 2048 -cores 2 >"$RUNNER_TEMP/rtc-emulator.log" 2>&1 &
+          emulator_pid=$!
+          sleep 5
+          kill -0 "$emulator_pid"
           adb_path="$ANDROID_HOME/platform-tools/adb"
           for attempt in $(seq 1 180); do
             if [[ "$("$adb_path" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; then break; fi
