@@ -6,6 +6,8 @@ A Linux desktop application that schedules **suspend and RTC wake**, with an AMO
 
 The original working Python/GTK release is preserved on the [`python-version`](https://github.com/mohamedbassem612/RTC-SLEEPER/tree/python-version) branch, including its README and successful build history.
 
+An Android remote-control app written in Rust is under `remote/android` and `android/`. It embeds Tailscale, pairs with the laptop using a QR code or a 24-word phrase, and uses the existing C++ scheduler through an unprivileged companion. Setup, builds, signing and safe mock testing: [Android guide](docs/ANDROID.md).
+
 ## Features
 
 - Fixed 1000 × 720 desktop window, black backgrounds and white accents.

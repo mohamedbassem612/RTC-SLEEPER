@@ -1,0 +1,10 @@
+[package]
+name = "rtc-sleeper-remote"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+rtc-remote-core = { path = "../core" }
+anyhow.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+libc = "0.2"

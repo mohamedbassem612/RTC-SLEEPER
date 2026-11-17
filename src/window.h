@@ -62,6 +62,7 @@ class Window : public QWidget {
     void schedule();
     bool operation(QString op, QJsonObject p = {});
     void settingsDialog();
+    void remoteDialog();
     void logsDialog();
 
   public:

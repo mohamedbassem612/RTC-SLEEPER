@@ -1,0 +1,17 @@
+[package]
+name = "rtc-sleeper-android"
+version = "0.1.0"
+edition = "2021"
+[lib]
+name = "rtc_sleeper_android"
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+rtc-remote-core = { path = "../core" }
+serde_json.workspace = true
+anyhow.workspace = true
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "=0.33.3", default-features = false, features = ["glow", "default_fonts", "android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.21"
+android_logger = "0.15"
+log = "0.4"

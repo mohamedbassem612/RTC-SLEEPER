@@ -6,4 +6,15 @@ build/
 *.egg-info/
 .DS_Store
 preferences.json
+remote/target/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/jniLibs/
+android/local.properties
+.tools/
+*.jks
+*.keystore
+*.apk
+*.aab
 

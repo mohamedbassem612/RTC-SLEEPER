@@ -1,0 +1,10 @@
+[Unit]
+Description=RTC Sleeper private mobile bridge
+After=network-online.target
+[Service]
+ExecStart=%h/.local/lib/rtc-sleeper-remote/rtc-sleeper-remote serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+[Install]
+WantedBy=default.target

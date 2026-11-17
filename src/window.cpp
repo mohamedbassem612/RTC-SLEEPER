@@ -1,8 +1,10 @@
 #include "window.h"
 #include <QApplication>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
@@ -11,12 +13,14 @@
 #include <QLocale>
 #include <QMessageBox>
 #include <QPainter>
+#include <QProcess>
 #include <QPropertyAnimation>
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 
@@ -766,10 +770,118 @@ void Window::logsDialog() {
     load();
     d.exec();
 }
+void Window::remoteDialog() {
+    QDialog d(this);
+    d.setWindowTitle(text("Remote Control · Android", "التحكم عن بعد · أندرويد"));
+    d.resize(640, 700);
+    auto *l = new QVBoxLayout(&d);
+    auto *status = label("", "muted");
+    status->setWordWrap(true);
+    l->addWidget(status);
+    auto *signIn = button(text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
+    l->addWidget(signIn);
+    auto *generate = button(text("New pairing code", "إنشاء كود اقتران"), "primary");
+    l->addWidget(generate);
+    auto *qr = new QLabel;
+    qr->setAlignment(Qt::AlignCenter);
+    l->addWidget(qr);
+    auto *phrase = new QTextEdit;
+    phrase->setReadOnly(true);
+    phrase->setMaximumHeight(130);
+    l->addWidget(phrase);
+    l->addWidget(
+        label(text("Scan the QR or enter the phrase in the Android app. Codes expire in 10 minutes "
+                   "and work once.",
+                   "امسح QR أو أدخل العبارة في تطبيق أندرويد. الكود صالح 10 دقائق ولمرة واحدة."),
+              "muted"));
+    auto *refresh = button(text("Refresh connection", "تحديث الاتصال"));
+    l->addWidget(refresh);
+    auto *revoke = button(text("Revoke all paired phones", "إلغاء صلاحية كل الهواتف"));
+    l->addWidget(revoke);
+    QString loginUrl;
+    auto request = [&](const QString &op) {
+        auto executable = QStandardPaths::findExecutable("rtc-sleeper-remote");
+        if (executable.isEmpty())
+            executable = QDir::homePath() + "/.local/bin/rtc-sleeper-remote";
+        QProcess p;
+        p.start(executable, {op});
+        if (!p.waitForStarted(1500) || !p.waitForFinished(9000)) {
+            p.kill();
+            p.waitForFinished();
+            throw std::runtime_error(
+                "Install/start the remote service: bash scripts/install-remote.sh");
+        }
+        auto bytes = p.readAllStandardOutput();
+        if (p.exitCode() != 0)
+            throw std::runtime_error(p.readAllStandardError().toStdString());
+        auto result = QJsonDocument::fromJson(bytes);
+        if (!result.isObject())
+            throw std::runtime_error("Invalid response from remote service");
+        return result.object();
+    };
+    auto update = [&] {
+        try {
+            auto s = request("status");
+            loginUrl = s["AuthURL"].toString();
+            bool ready = s["BackendState"] == "Running";
+            status->setText(
+                ready ? text("Private network connected. Ready to pair.",
+                             "الشبكة الخاصة متصلة. جاهز للاقتران.")
+                      : text("Sign in with the same Tailscale account used in the Android app.",
+                             "سجّل الدخول بنفس حساب Tailscale المستخدم في تطبيق أندرويد."));
+            generate->setEnabled(ready);
+            signIn->setEnabled(!ready);
+        } catch (const std::exception &e) {
+            status->setText(e.what());
+            generate->setEnabled(false);
+        }
+    };
+    connect(refresh, &QPushButton::clicked, &d, update);
+    connect(signIn, &QPushButton::clicked, &d, [&] {
+        try {
+            request("login");
+            update();
+            if (loginUrl.startsWith("https://login.tailscale.com/"))
+                QDesktopServices::openUrl(QUrl(loginUrl));
+            else
+                status->setText(text("Login starting; refresh in a moment.",
+                                     "تسجيل الدخول يبدأ؛ اضغط تحديث بعد لحظات."));
+        } catch (const std::exception &e) {
+            status->setText(e.what());
+        }
+    });
+    connect(generate, &QPushButton::clicked, &d, [&] {
+        try {
+            auto ticket = request("pair");
+            QPixmap image;
+            image.loadFromData(QByteArray::fromBase64(ticket["qr_png"].toString().toUtf8()), "PNG");
+            qr->setPixmap(image.scaled(300, 300, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            phrase->setPlainText(ticket["phrase"].toString());
+        } catch (const std::exception &e) {
+            status->setText(e.what());
+        }
+    });
+    connect(revoke, &QPushButton::clicked, &d, [&] {
+        if (QMessageBox::question(&d, text("Revoke phones?", "إلغاء صلاحية الهواتف؟"),
+                                  text("All paired phones will need a new pairing code.",
+                                       "كل الهواتف ستحتاج كود اقتران جديد.")) != QMessageBox::Yes)
+            return;
+        try {
+            request("revoke");
+            qr->clear();
+            phrase->clear();
+            status->setText(text("Phone access revoked.", "تم إلغاء صلاحية الهواتف."));
+        } catch (const std::exception &e) {
+            status->setText(e.what());
+        }
+    });
+    update();
+    d.exec();
+}
 void Window::settingsDialog() {
     QDialog d(this);
     d.setWindowTitle(text("Settings", "الإعدادات"));
-    d.setFixedSize(440, 260);
+    d.setFixedSize(440, 330);
     auto *l = new QVBoxLayout(&d);
     l->setContentsMargins(24, 24, 24, 24);
     l->addWidget(label(text("Language", "اللغة"), "heading"));
@@ -780,6 +892,9 @@ void Window::settingsDialog() {
     auto *logs = button(text("Activity Logs", "سجل النشاط"));
     l->addWidget(logs);
     connect(logs, &QPushButton::clicked, this, &Window::logsDialog);
+    auto *remote = button(text("Remote Control · Android", "التحكم عن بعد · أندرويد"));
+    l->addWidget(remote);
+    connect(remote, &QPushButton::clicked, this, &Window::remoteDialog);
     auto *close = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     l->addWidget(close);
     connect(close, &QDialogButtonBox::accepted, &d, &QDialog::accept);
