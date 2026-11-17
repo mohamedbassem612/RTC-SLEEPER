@@ -87,6 +87,8 @@ adb shell am instrument -w com.mohamedbassem.rtcsleeper.test/androidx.test.runne
 
 `NetworkStartupTest` launches the real embedded node in the app UID, checks the public Android network snapshot, rejects any startup error and waits for `NeedsLogin` or `Running`. It does not enroll an account or send any scheduler request. CI runs this test on Android 11 before publishing APKs; only the release APK is attached to tagged releases.
 
+Starting with 0.1.6, the same test also exercises a real tsnet dial with a short deadline while unenrolled, then a debug-only loopback laptop which replies `idle`, stops replying, and recovers. It checks that the UI stops being busy after a timeout, keeps the last confirmed status and recovers on a later read-only poll. The fixture never sends power commands. Production RPCs have one 12-second absolute deadline covering connect and response; there is no automatic retry of mutating actions. Go tests additionally verify cancellation of an unavailable dial and timeout of a silent peer. Reopening the app restores tsnet credentials instead of forcing interactive login; if login becomes necessary, the sign-in option remains visible after application pairing.
+
 For 0.1.4 this regression passed locally on the Android 11/API 30 AOSP x86_64 emulator (`OK (1 test)`). Both ARM64 and x86_64 signed release binaries also built and the APK signature verified. The earlier API 29 smoke test did not cover Android 11's NETLINK_ROUTE restriction; the new instrumentation test explicitly requires API 30+.
 
 ### Local validation for Android 0.1.2

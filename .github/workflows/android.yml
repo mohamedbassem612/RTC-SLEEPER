@@ -44,6 +44,13 @@ jobs:
         with:
           go-version: '1.27.4'
           cache: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: tailnet-go-v1-${{ runner.os }}-1.27.4-ndk28-${{ hashFiles('remote/tailnet/**', 'scripts/build-tailnet.sh') }}
+          restore-keys: tailnet-go-v1-${{ runner.os }}-1.27.4-ndk28-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.100.0'

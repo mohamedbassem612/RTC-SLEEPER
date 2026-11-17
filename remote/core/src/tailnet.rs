@@ -173,16 +173,24 @@ impl TailNode {
         Ok(())
     }
     pub fn dial(&self, address: &str) -> Result<std::os::unix::net::UnixStream> {
+        self.dial_timeout(address, Duration::from_secs(12))
+    }
+    pub fn dial_timeout(
+        &self,
+        address: &str,
+        timeout: Duration,
+    ) -> Result<std::os::unix::net::UnixStream> {
         let addr = CString::new(address)?;
         let mut fd = -1;
         let rc = unsafe {
-            self.lib.get::<unsafe extern "C" fn(
-                c_int,
-                *const c_char,
-                *const c_char,
-                *mut c_int,
-            ) -> c_int>(b"tailscale_dial\0")?(
-                self.id, c"tcp".as_ptr(), addr.as_ptr(), &mut fd
+            self.lib
+                .get::<unsafe extern "C" fn(c_int, *const c_char, c_int, *mut c_int) -> c_int>(
+                    b"RtcDialDeadline\0",
+                )?(
+                self.id,
+                addr.as_ptr(),
+                timeout.as_millis().min(30000) as c_int,
+                &mut fd,
             )
         };
         self.check(rc)?;

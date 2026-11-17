@@ -22,6 +22,8 @@ public final class MainActivity extends NativeActivity {
     private native void nativeScan(String code);
     // Implemented only in debug Rust binaries; no credentials are returned.
     public native String nativeNetworkTestState();
+    public native String nativeConnectionTestState();
+    public native String nativeDialDeadlineTest();
     @Override protected void onCreate(Bundle state) {
         try {
             android.system.Os.setenv("HOME", getFilesDir().getAbsolutePath(), true);
@@ -39,6 +41,8 @@ public final class MainActivity extends NativeActivity {
         // A debug-only, loopback-only route for emulator integration tests.
         if (BuildConfig.DEBUG && intent != null && intent.hasExtra("demo_pair"))
             nativeScan("demo:" + intent.getStringExtra("demo_pair"));
+        if (BuildConfig.DEBUG && intent != null && intent.hasExtra("demo_session"))
+            nativeScan("session:" + intent.getStringExtra("demo_session"));
     }
     public String scanQr() {
         runOnUiThread(() -> new IntentIntegrator(this)

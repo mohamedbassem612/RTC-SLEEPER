@@ -1,5 +1,5 @@
 use android_activity::AndroidApp;
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use jni::{
     objects::{JObject, JString, JValue},
@@ -20,6 +20,46 @@ static INPUT: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static ACTIVITY: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
 #[cfg(debug_assertions)]
 static NETWORK_TEST_STATE: OnceLock<Mutex<String>> = OnceLock::new();
+#[cfg(debug_assertions)]
+static CONNECTION_TEST_STATE: OnceLock<Mutex<String>> = OnceLock::new();
+#[cfg(debug_assertions)]
+static TEST_NODE: OnceLock<Mutex<Option<Arc<TailNode>>>> = OnceLock::new();
+
+#[cfg(debug_assertions)]
+#[no_mangle]
+pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeConnectionTestState(
+    env: JNIEnv,
+    _: JObject,
+) -> jni::sys::jstring {
+    let state = CONNECTION_TEST_STATE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    env.new_string(state.as_str()).unwrap().into_raw()
+}
+
+#[cfg(debug_assertions)]
+#[no_mangle]
+pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeDialDeadlineTest(
+    env: JNIEnv,
+    _: JObject,
+) -> jni::sys::jstring {
+    let node = TEST_NODE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .clone();
+    let started = Instant::now();
+    let error = node
+        .context("No test node")
+        .and_then(|n| n.dial_timeout("100.127.255.254:48187", Duration::from_millis(200)))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    env.new_string(json!({"elapsed_ms":started.elapsed().as_millis(),"error":error}).to_string())
+        .unwrap()
+        .into_raw()
+}
 
 #[cfg(debug_assertions)]
 #[no_mangle]
@@ -94,6 +134,7 @@ fn java_string(method: &str, arg: Option<&str>) -> Result<String> {
 enum Message {
     Node(Arc<TailNode>),
     Network(Value),
+    NetworkInfo(Value),
     Paired(Session),
     Status(Value),
     Logs(Value),
@@ -124,19 +165,42 @@ struct Mobile {
     demo: bool,
 }
 fn call(node: Option<Arc<TailNode>>, session: &Session, r: &Value, demo: bool) -> Result<Value> {
-    if demo && cfg!(debug_assertions) && session.ip == std::net::Ipv4Addr::new(10, 0, 2, 2) {
+    if demo
+        && cfg!(debug_assertions)
+        && (session.ip.is_loopback() || session.ip == std::net::Ipv4Addr::new(10, 0, 2, 2))
+    {
         let mut stream = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::new(session.ip.into(), session.port),
             Duration::from_secs(5),
         )?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
         exchange(&mut stream, r)
     } else {
         let node = node.context("Connect to the private network first")?;
-        node.update_android_network(&java_string("networkSnapshot", None)?)?;
         let mut stream = node.dial(&format!("{}:{}", session.ip, session.port))?;
         exchange(&mut stream, r)
     }
+}
+fn prepare_network(node: &Option<Arc<TailNode>>, demo: bool, tx: &Sender<Message>) -> Result<()> {
+    if demo && cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let node = node
+        .as_ref()
+        .context("Private network is still starting. Try again shortly.")?;
+    node.update_android_network(&java_string("networkSnapshot", None)?)?;
+    let status = node.status()?;
+    let state = status["BackendState"]
+        .as_str()
+        .unwrap_or("Starting")
+        .to_string();
+    let _ = tx.send(Message::NetworkInfo(status));
+    ensure!(
+        state == "Running",
+        "Private network: {state}. Reconnect or sign in below."
+    );
+    Ok(())
 }
 impl Mobile {
     fn new(ctx: &egui::Context) -> Self {
@@ -161,9 +225,9 @@ impl Mobile {
             .ok()
             .and_then(|s| serde_json::from_str::<Session>(&s).ok());
         let demo = cfg!(debug_assertions)
-            && session
-                .as_ref()
-                .is_some_and(|s| s.ip == std::net::Ipv4Addr::new(10, 0, 2, 2));
+            && session.as_ref().is_some_and(|s| {
+                s.ip.is_loopback() || s.ip == std::net::Ipv4Addr::new(10, 0, 2, 2)
+            });
         let mut app = Self {
             node: None,
             session,
@@ -212,7 +276,7 @@ impl Mobile {
                     "rtc-sleeper-android",
                     &snapshot,
                 )?;
-                let _ = node.login();
+                // tsnet restores saved credentials and starts login only if needed.
                 Ok(node)
             })();
             let _ = tx.send(match result {
@@ -250,7 +314,8 @@ impl Mobile {
                 return;
             }
         };
-        self.demo = cfg!(debug_assertions) && ticket.ip == std::net::Ipv4Addr::new(10, 0, 2, 2);
+        self.demo = cfg!(debug_assertions)
+            && (ticket.ip.is_loopback() || ticket.ip == std::net::Ipv4Addr::new(10, 0, 2, 2));
         let temp = Session {
             token: String::new(),
             device: "Android".into(),
@@ -264,7 +329,9 @@ impl Mobile {
         let tx = self.tx.clone();
         self.busy = true;
         std::thread::spawn(move || {
-            let result = call(node, &temp, &r, demo).and_then(|v| Ok(serde_json::from_value(v)?));
+            let result = prepare_network(&node, demo, &tx)
+                .and_then(|_| call(node, &temp, &r, demo))
+                .and_then(|v| Ok(serde_json::from_value(v)?));
             let _ = tx.send(match result {
                 Ok(session) => Message::Paired(session),
                 Err(e) => Message::Error(e.to_string()),
@@ -285,7 +352,8 @@ impl Mobile {
         let op = op.to_string();
         self.busy = true;
         std::thread::spawn(move || {
-            let result = call(node, &session, &r, demo);
+            let result =
+                prepare_network(&node, demo, &tx).and_then(|_| call(node, &session, &r, demo));
             let _ = tx.send(match result {
                 Ok(v) if op == "logs" => Message::Logs(v),
                 Ok(v) => Message::Status(v),
@@ -299,11 +367,22 @@ impl Mobile {
     }
     fn messages(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
+            if let Message::NetworkInfo(v) = message {
+                self.network = v;
+                continue;
+            }
             self.busy = false;
+            self.last_poll = Instant::now();
             match message {
                 Message::Node(node) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        *TEST_NODE.get_or_init(Default::default).lock().unwrap() =
+                            Some(node.clone());
+                    }
                     self.node = Some(node);
                     self.error.clear();
+                    self.last_poll = Instant::now() - Duration::from_secs(5);
                 }
                 Message::Network(v) => {
                     #[cfg(debug_assertions)]
@@ -346,8 +425,16 @@ impl Mobile {
                             .lock()
                             .unwrap() = format!("error: {e}");
                     }
-                    self.error = e;
+                    self.error = if e.contains("deadline")
+                        || e.contains("timed out")
+                        || e.contains("temporarily unavailable")
+                    {
+                        "Laptop connection timed out. Refresh status to retry. No action was automatically repeated.".into()
+                    } else {
+                        e
+                    };
                 }
+                Message::NetworkInfo(_) => unreachable!(),
             }
         }
     }
@@ -412,7 +499,19 @@ impl eframe::App for Mobile {
             .drain(..)
             .collect::<Vec<_>>();
         for code in inputs {
-            if let Some(code) = code.strip_prefix("demo:") {
+            if let Some(saved) = code.strip_prefix("session:") {
+                if cfg!(debug_assertions) {
+                    if let Ok(session) = serde_json::from_str::<Session>(saved) {
+                        if session.ip.is_loopback()
+                            || session.ip == std::net::Ipv4Addr::new(10, 0, 2, 2)
+                        {
+                            self.demo = true;
+                            self.session = Some(session);
+                            self.last_poll = Instant::now() - Duration::from_secs(5);
+                        }
+                    }
+                }
+            } else if let Some(code) = code.strip_prefix("demo:") {
                 if cfg!(debug_assertions) {
                     self.demo = true;
                     self.phrase = code.into();
@@ -432,8 +531,18 @@ impl eframe::App for Mobile {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK).inner_margin(20)).show(ctx,|ui|{egui::ScrollArea::vertical().show(ui,|ui|{
             ui.add_space(22.);ui.heading(RichText::new("RTC Sleeper").size(30.));ui.label("Private remote control · Rust");ui.separator();
             if self.demo{ui.colored_label(Color32::YELLOW,"TEST MODE — simulated laptop only");}
-            if self.busy{ui.horizontal(|ui|{ui.spinner();ui.label("Connecting…");});}
+            if self.busy{ui.horizontal(|ui|{ui.spinner();ui.label(if self.node.is_none(){"Starting private network…"}else{"Refreshing connection…"});});}
             if !self.error.is_empty(){ui.colored_label(Color32::from_rgb(255,150,150),&self.error);}
+            if self.session.is_some() && !self.demo {
+                let network_state=self.network["BackendState"].as_str().unwrap_or("Starting");
+                if network_state!="Running" {
+                    ui.label(format!("Private network: {network_state}"));
+                    if let Some(url)=self.network["AuthURL"].as_str().filter(|s|s.starts_with("https://login.tailscale.com/")) {
+                        if ui.button("Sign in to Tailscale").clicked(){let _=java_string("openBrowser",Some(url));}
+                    }
+                    if self.node.is_none() && !self.busy && ui.button("Reconnect private network").clicked(){self.start_network();}
+                }
+            }
             if self.session.is_none(){
                 ui.heading("1. Private network");let running=self.network["BackendState"]=="Running";ui.label(if running{"Connected to your private network"}else{"Sign in once to your Tailscale account"});
                 if let Some(url)=self.network["AuthURL"].as_str().filter(|s|s.starts_with("https://login.tailscale.com/")){if ui.button("Sign in to Tailscale").clicked(){let _=java_string("openBrowser",Some(url));}}
@@ -445,7 +554,7 @@ impl eframe::App for Mobile {
                 if ui.add_enabled(!self.busy,egui::Button::new("Pair Laptop").min_size(Vec2::new(ui.available_width(),46.))).clicked(){self.pair();}
                 ui.label("Pairing codes stay valid until regenerated on the laptop. The laptop controls access for each phone.");
             }else{
-                let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("Connecting").to_string();ui.heading(&status);ui.label(if online{"Laptop online"}else{"Laptop offline or sleeping — existing RTC wake still applies"});
+                let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("Waiting for laptop status").to_string();ui.heading(&status);ui.label(if online{"Laptop online"}else if self.last_ok.is_some(){"Connection lost · showing last confirmed status"}else{"Laptop status has not been received yet"});
                 if let Some(next)=self.state["next_sleep"].as_u64(){let seconds=next.saturating_sub(now());ui.label(format!("Will sleep in: {} h {} min {} s",seconds/3600,seconds/60%60,seconds%60));}
                 if let Some(message)=self.state["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
                 if ui.add_enabled(!self.busy,egui::Button::new("Refresh status")).clicked(){self.command("status",json!({}));}
@@ -488,6 +597,15 @@ impl eframe::App for Mobile {
                         }
                     });
                 });
+        }
+        #[cfg(debug_assertions)]
+        {
+            *CONNECTION_TEST_STATE
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap() =
+                json!({"busy":self.busy,"status":self.state["status"],"error":self.error})
+                    .to_string();
         }
         ctx.request_repaint_after(Duration::from_millis(250));
     }

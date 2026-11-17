@@ -9,11 +9,15 @@ fi
 [[ "$(git -C "$vendor_dir" rev-parse HEAD)" == "$revision" ]] || git -C "$vendor_dir" checkout "$revision"
 cp "$repo_dir/remote/tailnet/rtc_android.go" "$vendor_dir/rtc_android.go"
 cp "$repo_dir/remote/tailnet/rtc_quiet.go" "$vendor_dir/rtc_quiet.go"
+cp "$repo_dir/remote/tailnet/rtc_deadline.go" "$vendor_dir/rtc_deadline.go"
+cp "$repo_dir/remote/tailnet/rtc_transport.go" "$vendor_dir/rtc_transport.go"
+cp "$repo_dir/remote/tailnet/rtc_deadline_test.go" "$vendor_dir/rtc_deadline_test.go"
 target="${1:-linux}"
 output_dir="${2:-$repo_dir/dist/remote}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 if [[ "$target" == linux ]]; then
+    (cd "$vendor_dir" && GOMAXPROCS=2 go test -p 2 rtc_transport.go rtc_deadline_test.go)
     (cd "$vendor_dir" && GOMAXPROCS=2 CGO_ENABLED=1 go build -p 2 -buildmode=c-shared -ldflags='-s -w' -o "$output_dir/libtailscale.so" .)
 else
     sdk_dir="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
