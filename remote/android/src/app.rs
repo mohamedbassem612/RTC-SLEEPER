@@ -48,16 +48,23 @@ fn java_string(method: &str, arg: Option<&str>) -> Result<String> {
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    let value = if let Some(arg) = arg {
+    let result = if let Some(arg) = arg {
         let s = env.new_string(arg)?;
         env.call_method(
             &activity,
             method,
             "(Ljava/lang/String;)Ljava/lang/String;",
             &[JValue::Object(&s)],
-        )?
+        )
     } else {
-        env.call_method(&activity, method, "()Ljava/lang/String;", &[])?
+        env.call_method(&activity, method, "()Ljava/lang/String;", &[])
+    };
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = env.exception_clear();
+            return Err(error.into());
+        }
     };
     let obj = value.l()?;
     if obj.is_null() {
@@ -136,6 +143,10 @@ impl Mobile {
         let session = java_string("loadSession", None)
             .ok()
             .and_then(|s| serde_json::from_str::<Session>(&s).ok());
+        let demo = cfg!(debug_assertions)
+            && session
+                .as_ref()
+                .is_some_and(|s| s.ip == std::net::Ipv4Addr::new(10, 0, 2, 2));
         let mut app = Self {
             node: None,
             session,
@@ -158,7 +169,7 @@ impl Mobile {
             confirm: None,
             last_poll: Instant::now(),
             last_ok: None,
-            demo: false,
+            demo,
         };
         app.start_network();
         app
@@ -387,7 +398,7 @@ impl eframe::App for Mobile {
                 ui.heading("1. Private network");let running=self.network["BackendState"]=="Running";ui.label(if running{"Connected to your private network"}else{"Sign in once to your Tailscale account"});
                 if let Some(url)=self.network["AuthURL"].as_str().filter(|s|s.starts_with("https://login.tailscale.com/")){if ui.button("Sign in to Tailscale").clicked(){let _=java_string("openBrowser",Some(url));}}
                 if self.node.is_none()&&!self.busy&&ui.button("Connect private network").clicked(){self.start_network();}
-                ui.separator();ui.heading("2. Pair your laptop");ui.label("On your laptop: Settings → Remote Control → New pairing code.");
+                ui.separator();ui.heading("2. Pair your laptop");ui.label("On your laptop: Settings > Remote Control > New pairing code.");
                 if ui.button("Scan QR Code").clicked(){if let Err(e)=java_string("scanQr",None){self.error=e.to_string();}}
                 if ui.button("Enter Pairing Phrase").clicked(){if let Err(e)=java_string("enterPhrase",None){self.error=e.to_string();}}
                 ui.label("Or enter the 24-word pairing phrase:");ui.add(egui::TextEdit::multiline(&mut self.phrase).hint_text("Paste pairing phrase or scanned QR link").desired_rows(5).desired_width(f32::INFINITY));
@@ -399,7 +410,7 @@ impl eframe::App for Mobile {
                 if let Some(message)=self.state["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
                 if ui.add_enabled(!self.busy,egui::Button::new("Refresh status")).clicked(){self.command("status",json!({}));}
                 ui.separator();toggle(ui,&mut self.now,"Sleep Now");ui.add_enabled_ui(!self.now,|ui|{time_fields(ui,"Sleep at",&mut self.sh,&mut self.sm,&mut self.sp);});time_fields(ui,"Wake up at",&mut self.wh,&mut self.wm,&mut self.wp);
-                ui.add_enabled_ui(!self.now,|ui|{ui.label("Repeat on sleep-start days");ui.horizontal_wrapped(|ui|{for(i,day)in["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].iter().enumerate(){toggle(ui,&mut self.days[i],day);}});});
+                ui.add_enabled_ui(!self.now,|ui|{ui.label("Repeat on sleep-start days");egui::Grid::new("repeat_days").num_columns(2).spacing([20.,12.]).show(ui,|ui|{for(i,day)in["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].iter().enumerate(){toggle(ui,&mut self.days[i],day);if i%2==1{ui.end_row();}}});});
                 ui.add_enabled_ui(online&&!self.busy,|ui|{
                     if ui.add(egui::Button::new("Apply Schedule").min_size(Vec2::new(ui.available_width(),48.))).clicked(){let p=self.configuration();if let Err(e)=validate_operation("schedule",&p){self.error=e.to_string();}else{self.confirm=Some(("schedule".into(),p));}}
                     ui.horizontal_wrapped(|ui|{for(op,label)in[(if status=="paused"{"resume"}else{"pause"},if status=="paused"{"Resume"}else{"Pause"}),("cancel","Remove"),("logs","Logs")]{if ui.button(label).clicked(){if op=="logs"{self.command(op,json!({"limit":50}));}else{self.confirm=Some((op.into(),json!({})));}}}});

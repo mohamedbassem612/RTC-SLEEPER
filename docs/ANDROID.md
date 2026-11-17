@@ -73,6 +73,14 @@ adb shell am start -n com.mohamedbassem.rtcsleeper/.MainActivity
 
 Real off-network encrypted connectivity requires enrolling both nodes with a live Tailscale account and testing on separate networks. Local unit/emulator tests cannot replace that check.
 
+### Local validation for Android 0.1.0
+
+- Rust pairing/validation/authorization tests and the isolated loopback integration test passed; existing C++ engine/interface tests passed.
+- Built a signed universal release APK for arm64-v8a and x86_64, passed release lint and verified its APK signature.
+- On the Android 10/API 29 x86_64 emulator: launched the embedded Tailscale node, paired with the mock laptop, applied a simulated schedule, paused/removed it and displayed logs. Pairing survived an app restart using encrypted Android Keystore storage.
+- Opened the native phrase-entry dialog, granted camera permission and displayed the live emulator camera scanner. QR payload decoding is covered by the Rust test; scanning a physical laptop screen with a phone remains a device check.
+- No real suspend, shutdown or RTC-alarm modification was used for these tests. Live enrollment and separate-network connectivity still require the account setup above.
+
 ## GitHub releases
 
 `Android Rust build and release` runs Rust and mock-integration tests, builds arm64/x86-64 native code, embeds Tailscale, signs a universal APK and uploads artifacts. An `android-v*` tag publishes an Android-specific GitHub Release plus the Linux companion. Release signing uses repository secrets `RTC_ANDROID_KEYSTORE` and `RTC_ANDROID_KEYSTORE_PASSWORD`. Fork pull requests build a debug APK without release secrets.

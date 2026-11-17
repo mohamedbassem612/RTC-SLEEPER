@@ -32,6 +32,16 @@ impl TailNode {
         }
         .context("Embedded Tailscale library is missing")?;
         let lib = Arc::new(Library::from(loaded));
+        let directory = CString::new(state.to_string_lossy().as_bytes())?;
+        let configured = unsafe {
+            lib.get::<unsafe extern "C" fn(*const c_char) -> c_int>(b"RtcStateDir\0")?(
+                directory.as_ptr(),
+            )
+        };
+        ensure!(
+            configured == 0,
+            "Cannot initialize private Tailscale storage"
+        );
         let id = unsafe { lib.get::<unsafe extern "C" fn() -> c_int>(b"tailscale_new\0")?() };
         let node = Arc::new(Self { lib, id });
         unsafe {
@@ -122,12 +132,13 @@ impl TailNode {
         let auth = base64::engine::general_purpose::STANDARD.encode(format!(":{credential}"));
         let mut stream = std::net::TcpStream::connect(addr)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        write!(stream,"POST /localapi/v0/login-interactive HTTP/1.0\r\nHost: localhost\r\nAuthorization: Basic {auth}\r\nSec-Tailscale: localapi\r\nContent-Length: 0\r\n\r\n")?;
+        write!(stream,"POST /localapi/v0/login-interactive HTTP/1.0\r\nHost: {addr}\r\nAuthorization: Basic {auth}\r\nSec-Tailscale: localapi\r\nContent-Length: 0\r\n\r\n")?;
         let mut response = String::new();
         stream.take(65536).read_to_string(&mut response)?;
         ensure!(
             response.starts_with("HTTP/1.0 2") || response.starts_with("HTTP/1.1 2"),
-            "Tailscale login could not start"
+            "Tailscale login could not start: {}",
+            response.lines().next().unwrap_or("empty response")
         );
         Ok(())
     }
