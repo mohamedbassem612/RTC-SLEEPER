@@ -20,6 +20,22 @@ pub struct TailNode {
 }
 impl TailNode {
     pub fn new(library: &Path, state: &Path, name: &str) -> Result<Arc<Self>> {
+        Self::create(library, state, name, None)
+    }
+    pub fn new_android(
+        library: &Path,
+        state: &Path,
+        name: &str,
+        network: &str,
+    ) -> Result<Arc<Self>> {
+        Self::create(library, state, name, Some(network))
+    }
+    fn create(
+        library: &Path,
+        state: &Path,
+        name: &str,
+        network: Option<&str>,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(state)?;
         #[cfg(unix)]
         {
@@ -44,6 +60,9 @@ impl TailNode {
         );
         let id = unsafe { lib.get::<unsafe extern "C" fn() -> c_int>(b"tailscale_new\0")?() };
         let node = Arc::new(Self { lib, id });
+        if let Some(snapshot) = network {
+            node.update_android_network(snapshot)?;
+        }
         unsafe {
             node.lib.get::<unsafe extern "C" fn(c_int)>(b"RtcQuiet\0")?(id);
         }
@@ -61,6 +80,17 @@ impl TailNode {
         };
         node.check(rc)?;
         Ok(node)
+    }
+    pub fn update_android_network(&self, snapshot: &str) -> Result<()> {
+        let snapshot = CString::new(snapshot)?;
+        let rc = unsafe {
+            self.lib
+                .get::<unsafe extern "C" fn(c_int, *const c_char) -> c_int>(
+                    b"RtcAndroidNetwork\0",
+                )?(self.id, snapshot.as_ptr())
+        };
+        ensure!(rc == 0, "Cannot read Android network interfaces");
+        Ok(())
     }
     fn check(&self, rc: c_int) -> Result<()> {
         if rc != 0 {

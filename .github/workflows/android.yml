@@ -77,6 +77,32 @@ jobs:
       - name: Build debug APK for pull requests
         if: github.event_name == 'pull_request'
         run: bash scripts/build-android.sh debug
+      - name: Build Android sandbox regression test
+        env:
+          RTC_ANDROID_ABIS: x86_64
+        run: |
+          bash scripts/build-android.sh debug
+          android/gradlew -p android --no-daemon :app:assembleDebugAndroidTest
+      - name: Start Android 11 emulator and test embedded network startup
+        timeout-minutes: 12
+        run: |
+          sdkmanager_path="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)"
+          "$sdkmanager_path" 'emulator' 'system-images;android-30;default;x86_64'
+          avdmanager_path="$(dirname "$sdkmanager_path")/avdmanager"
+          echo no | "$avdmanager_path" create avd -n rtc-network-test -k 'system-images;android-30;default;x86_64'
+          sudo chmod 666 /dev/kvm
+          "$ANDROID_HOME/emulator/emulator" -avd rtc-network-test -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 -cores 2 >"$RUNNER_TEMP/rtc-emulator.log" 2>&1 &
+          adb_path="$ANDROID_HOME/platform-tools/adb"
+          for attempt in $(seq 1 180); do
+            if [[ "$("$adb_path" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; then break; fi
+            sleep 2
+          done
+          test "$("$adb_path" shell getprop sys.boot_completed | tr -d '\r')" = 1
+          "$adb_path" install -r android/app/build/outputs/apk/debug/app-debug.apk
+          "$adb_path" install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          "$adb_path" shell am instrument -w com.mohamedbassem.rtcsleeper.test/androidx.test.runner.AndroidJUnitRunner | tee "$RUNNER_TEMP/rtc-network-test.txt"
+          grep -Eq '^OK \(1 test\)' "$RUNNER_TEMP/rtc-network-test.txt"
+          "$adb_path" emu kill
       - name: Build desktop companion archive
         run: |
           mkdir -p dist/rtc-sleeper-remote/scripts
@@ -89,7 +115,11 @@ jobs:
           tar -C dist -czf dist/rtc-sleeper-remote-linux-x86_64.tar.gz rtc-sleeper-remote
       - name: Collect installable APK and checksums
         run: |
-          cp android/app/build/outputs/apk/*/*.apk dist/
+          if [[ '${{ github.event_name }}' == pull_request ]]; then
+            cp android/app/build/outputs/apk/debug/*.apk dist/
+          else
+            cp android/app/build/outputs/apk/release/*.apk dist/
+          fi
           cd dist
           sha256sum *.apk *.tar.gz > SHA256SUMS-android
       - uses: actions/upload-artifact@v4

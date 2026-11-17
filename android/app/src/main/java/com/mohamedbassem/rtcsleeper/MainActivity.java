@@ -20,6 +20,8 @@ import javax.crypto.spec.GCMParameterSpec;
 public final class MainActivity extends NativeActivity {
     static { System.loadLibrary("rtc_sleeper_android"); }
     private native void nativeScan(String code);
+    // Implemented only in debug Rust binaries; no credentials are returned.
+    public native String nativeNetworkTestState();
     @Override protected void onCreate(Bundle state) {
         try {
             android.system.Os.setenv("HOME", getFilesDir().getAbsolutePath(), true);
@@ -64,6 +66,36 @@ public final class MainActivity extends NativeActivity {
         else super.onActivityResult(request, result, data);
     }
     public String libraryDirectory() { return getApplicationInfo().nativeLibraryDir; }
+    /** Public Android APIs work for app UIDs where Go's NETLINK_ROUTE is denied. */
+    public String networkSnapshot() {
+        android.net.ConnectivityManager manager = (android.net.ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+        org.json.JSONArray result = new org.json.JSONArray();
+        java.util.LinkedHashSet<android.net.Network> networks = new java.util.LinkedHashSet<>();
+        android.net.Network active = manager.getActiveNetwork();
+        if (active != null) networks.add(active);
+        java.util.Collections.addAll(networks, manager.getAllNetworks());
+        java.util.HashSet<String> names = new java.util.HashSet<>();
+        try {
+            for (android.net.Network network : networks) {
+                android.net.LinkProperties link = manager.getLinkProperties(network);
+                if (link == null || link.getInterfaceName() == null || !names.add(link.getInterfaceName())) continue;
+                org.json.JSONArray addresses = new org.json.JSONArray();
+                for (android.net.LinkAddress address : link.getLinkAddresses()) {
+                    String ip = address.getAddress().getHostAddress().split("%", 2)[0];
+                    addresses.put(ip + "/" + address.getPrefixLength());
+                }
+                String gateway = "";
+                for (android.net.RouteInfo route : link.getRoutes()) {
+                    if (route.isDefaultRoute() && route.getGateway() != null) {
+                        gateway = route.getGateway().getHostAddress().split("%", 2)[0]; break;
+                    }
+                }
+                result.put(new org.json.JSONObject().put("name", link.getInterfaceName())
+                    .put("mtu", link.getMtu()).put("addresses", addresses).put("gateway", gateway));
+            }
+            return result.toString();
+        } catch (org.json.JSONException ex) { throw new IllegalStateException("Cannot read Android networks", ex); }
+    }
     public String deviceName() { return (android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).substring(0, Math.min(70, (android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).length())); }
     public String openBrowser(String url) {
         if (!url.startsWith("https://login.tailscale.com/")) throw new IllegalArgumentException("Invalid login URL");

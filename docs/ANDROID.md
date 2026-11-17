@@ -53,7 +53,7 @@ bash scripts/build-tailnet.sh linux dist/remote
 cargo build --manifest-path remote/Cargo.toml --release -p rtc-sleeper-remote
 ```
 
-Release builds require `RTC_KEYSTORE` (path) and `RTC_KEYSTORE_PASSWORD`; alias is `rtc-sleeper`. Signing keys are not committed. `RTC_ANDROID_ABIS` can restrict a local build to `x86_64` or `arm64-v8a`. `RTC_GRADLE` can select a specific Gradle executable. The official libtailscale source is pinned to `dacde75057ff350e146505829beff446e6823966`; its BSD license is included in generated bundles. Android builds opt into Tailscale's official `androidbin` support for Android network-interface/DNS/certificate restrictions.
+Release builds require `RTC_KEYSTORE` (path) and `RTC_KEYSTORE_PASSWORD`; alias is `rtc-sleeper`. Signing keys are not committed. `RTC_ANDROID_ABIS` can restrict a local build to `x86_64` or `arm64-v8a`. `RTC_GRADLE` can select a specific Gradle executable. The official libtailscale source is pinned to `dacde75057ff350e146505829beff446e6823966`; its BSD license is included in generated bundles. Android's `ConnectivityManager` supplies interface names, addresses, MTUs and default gateway through Rust to a registered `netmon` getter **before** tsnet startup. The snapshot refreshes during network/status polling and before remote requests; changes notify netmon. This avoids Android 11+ blocking Go's NETLINK_ROUTE access. Importing `androidbin` alone is insufficient: its interface fallback explicitly excludes Android CGO builds such as our shared library.
 
 ## Tests — never suspend the development machine
 
@@ -74,6 +74,18 @@ adb shell am start -n com.mohamedbassem.rtcsleeper/.MainActivity
 ```
 
 Real off-network encrypted connectivity requires enrolling both nodes with a live Tailscale account and testing on separate networks. Local unit/emulator tests cannot replace that check.
+
+Android sandbox regression (run on an online API 30+ emulator):
+
+```bash
+RTC_ANDROID_ABIS=x86_64 bash scripts/build-android.sh debug
+android/gradlew -p android :app:assembleDebugAndroidTest
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w com.mohamedbassem.rtcsleeper.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+`NetworkStartupTest` launches the real embedded node in the app UID, checks the public Android network snapshot, rejects any startup error and waits for `NeedsLogin` or `Running`. It does not enroll an account or send any scheduler request. CI runs this test on Android 11 before publishing APKs; only the release APK is attached to tagged releases.
 
 ### Local validation for Android 0.1.2
 

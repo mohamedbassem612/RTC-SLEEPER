@@ -18,6 +18,23 @@ use std::{
 
 static INPUT: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static ACTIVITY: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
+#[cfg(debug_assertions)]
+static NETWORK_TEST_STATE: OnceLock<Mutex<String>> = OnceLock::new();
+
+#[cfg(debug_assertions)]
+#[no_mangle]
+pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeNetworkTestState(
+    env: JNIEnv,
+    _: JObject,
+) -> jni::sys::jstring {
+    let state = NETWORK_TEST_STATE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    env.new_string(state.as_str())
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
 
 fn activity() -> Result<AndroidApp> {
     ACTIVITY
@@ -115,9 +132,9 @@ fn call(node: Option<Arc<TailNode>>, session: &Session, r: &Value, demo: bool) -
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         exchange(&mut stream, r)
     } else {
-        let mut stream = node
-            .context("Connect to the private network first")?
-            .dial(&format!("{}:{}", session.ip, session.port))?;
+        let node = node.context("Connect to the private network first")?;
+        node.update_android_network(&java_string("networkSnapshot", None)?)?;
+        let mut stream = node.dial(&format!("{}:{}", session.ip, session.port))?;
         exchange(&mut stream, r)
     }
 }
@@ -188,7 +205,13 @@ impl Mobile {
                     .context("Private app storage unavailable")?;
                 let library =
                     PathBuf::from(java_string("libraryDirectory", None)?).join("libtailscale.so");
-                let node = TailNode::new(&library, &dir.join("tailnet"), "rtc-sleeper-android")?;
+                let snapshot = java_string("networkSnapshot", None)?;
+                let node = TailNode::new_android(
+                    &library,
+                    &dir.join("tailnet"),
+                    "rtc-sleeper-android",
+                    &snapshot,
+                )?;
                 let _ = node.login();
                 Ok(node)
             })();
@@ -206,7 +229,9 @@ impl Mobile {
             self.busy = true;
             let tx = self.tx.clone();
             std::thread::spawn(move || {
-                let result = node.status();
+                let result = java_string("networkSnapshot", None)
+                    .and_then(|snapshot| node.update_android_network(&snapshot))
+                    .and_then(|_| node.status());
                 let _ = tx.send(match result {
                     Ok(s) => Message::Network(s),
                     Err(e) => Message::Error(e.to_string()),
@@ -281,6 +306,13 @@ impl Mobile {
                     self.error.clear();
                 }
                 Message::Network(v) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        *NETWORK_TEST_STATE
+                            .get_or_init(Default::default)
+                            .lock()
+                            .unwrap() = v["BackendState"].as_str().unwrap_or("").into();
+                    }
                     self.network = v;
                 }
                 Message::Paired(session) => {
@@ -307,6 +339,13 @@ impl Mobile {
                     self.last_ok = Some(Instant::now());
                 }
                 Message::Error(e) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        *NETWORK_TEST_STATE
+                            .get_or_init(Default::default)
+                            .lock()
+                            .unwrap() = format!("error: {e}");
+                    }
                     self.error = e;
                 }
             }
