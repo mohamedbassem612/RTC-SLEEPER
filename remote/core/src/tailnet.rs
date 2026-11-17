@@ -26,9 +26,12 @@ impl TailNode {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700))?;
         }
-        let lib = Arc::new(
-            unsafe { Library::new(library) }.context("Embedded Tailscale library is missing")?,
-        );
+        // A Go c-shared runtime must stay mapped until the process exits.
+        let loaded = unsafe {
+            libloading::os::unix::Library::open(Some(library), libc::RTLD_NOW | libc::RTLD_NODELETE)
+        }
+        .context("Embedded Tailscale library is missing")?;
+        let lib = Arc::new(Library::from(loaded));
         let id = unsafe { lib.get::<unsafe extern "C" fn() -> c_int>(b"tailscale_new\0")?() };
         let node = Arc::new(Self { lib, id });
         unsafe {

@@ -17,7 +17,16 @@ use std::{
 };
 
 static INPUT: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-static ACTIVITY: OnceLock<AndroidApp> = OnceLock::new();
+static ACTIVITY: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
+
+fn activity() -> Result<AndroidApp> {
+    ACTIVITY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .clone()
+        .context("Activity unavailable")
+}
 
 #[no_mangle]
 pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeScan(
@@ -35,7 +44,7 @@ pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeScan
 }
 
 fn java_string(method: &str, arg: Option<&str>) -> Result<String> {
-    let app = ACTIVITY.get().context("Activity unavailable")?;
+    let app = activity()?;
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
@@ -162,7 +171,7 @@ impl Mobile {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let result: Result<Arc<TailNode>> = (|| {
-                let app = ACTIVITY.get().context("Activity missing")?;
+                let app = activity()?;
                 let dir = app
                     .internal_data_path()
                     .context("Private app storage unavailable")?;
@@ -380,6 +389,7 @@ impl eframe::App for Mobile {
                 if self.node.is_none()&&!self.busy&&ui.button("Connect private network").clicked(){self.start_network();}
                 ui.separator();ui.heading("2. Pair your laptop");ui.label("On your laptop: Settings → Remote Control → New pairing code.");
                 if ui.button("Scan QR Code").clicked(){if let Err(e)=java_string("scanQr",None){self.error=e.to_string();}}
+                if ui.button("Enter Pairing Phrase").clicked(){if let Err(e)=java_string("enterPhrase",None){self.error=e.to_string();}}
                 ui.label("Or enter the 24-word pairing phrase:");ui.add(egui::TextEdit::multiline(&mut self.phrase).hint_text("Paste pairing phrase or scanned QR link").desired_rows(5).desired_width(f32::INFINITY));
                 if ui.add_enabled(!self.busy,egui::Button::new("Pair Laptop").min_size(Vec2::new(ui.available_width(),46.))).clicked(){self.pair();}
                 ui.label("Codes expire after 10 minutes and work once. The laptop must be awake and online.");
@@ -436,7 +446,7 @@ pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Warn),
     );
-    let _ = ACTIVITY.set(app.clone());
+    *ACTIVITY.get_or_init(Default::default).lock().unwrap() = Some(app.clone());
     let options = eframe::NativeOptions {
         android_app: Some(app),
         renderer: eframe::Renderer::Glow,

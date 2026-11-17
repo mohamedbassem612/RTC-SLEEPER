@@ -8,9 +8,9 @@ ndk_dir="${ANDROID_NDK_HOME:-$sdk_dir/ndk/28.2.13676358}"
 abi_list="${RTC_ANDROID_ABIS:-arm64-v8a x86_64}"
 for abi in $abi_list; do
     case "$abi" in arm64-v8a) triple=aarch64-linux-android ;; x86_64) triple=x86_64-linux-android ;; *) exit 1 ;; esac
-    jni_dir="$repo_dir/android/app/src/main/jniLibs/$abi"
+    jni_dir="$repo_dir/android/app/src/$build_type/jniLibs/$abi"
     mkdir -p "$jni_dir"
-    if [[ ! -f "$jni_dir/libtailscale.so" ]]; then bash "$repo_dir/scripts/build-tailnet.sh" "$abi" "$jni_dir"; fi
+    bash "$repo_dir/scripts/build-tailnet.sh" "$abi" "$jni_dir"
     linker="$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin/${triple}26-clang"
     env_name="CARGO_TARGET_$(tr '[:lower:]-' '[:upper:]_' <<< "$triple")_LINKER"
     cargo_flags=(); [[ "$build_type" == release ]] && cargo_flags+=(--release)

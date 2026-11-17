@@ -787,13 +787,15 @@ void Window::remoteDialog() {
     l->addWidget(qr);
     auto *phrase = new QTextEdit;
     phrase->setReadOnly(true);
-    phrase->setMaximumHeight(130);
+    phrase->setMaximumHeight(100);
     l->addWidget(phrase);
-    l->addWidget(
+    auto *instructions =
         label(text("Scan the QR or enter the phrase in the Android app. Codes expire in 10 minutes "
                    "and work once.",
                    "امسح QR أو أدخل العبارة في تطبيق أندرويد. الكود صالح 10 دقائق ولمرة واحدة."),
-              "muted"));
+              "muted");
+    instructions->setWordWrap(true);
+    l->addWidget(instructions);
     auto *refresh = button(text("Refresh connection", "تحديث الاتصال"));
     l->addWidget(refresh);
     auto *revoke = button(text("Revoke all paired phones", "إلغاء صلاحية كل الهواتف"));
@@ -855,7 +857,7 @@ void Window::remoteDialog() {
             auto ticket = request("pair");
             QPixmap image;
             image.loadFromData(QByteArray::fromBase64(ticket["qr_png"].toString().toUtf8()), "PNG");
-            qr->setPixmap(image.scaled(300, 300, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            qr->setPixmap(image.scaled(260, 260, Qt::KeepAspectRatio, Qt::SmoothTransformation));
             phrase->setPlainText(ticket["phrase"].toString());
         } catch (const std::exception &e) {
             status->setText(e.what());

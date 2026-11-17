@@ -21,6 +21,12 @@ public final class MainActivity extends NativeActivity {
     static { System.loadLibrary("rtc_sleeper_android"); }
     private native void nativeScan(String code);
     @Override protected void onCreate(Bundle state) {
+        try {
+            android.system.Os.setenv("HOME", getFilesDir().getAbsolutePath(), true);
+            android.system.Os.setenv("TMPDIR", getCacheDir().getAbsolutePath(), true);
+        } catch (android.system.ErrnoException ex) {
+            throw new IllegalStateException("Cannot initialize native private storage", ex);
+        }
         super.onCreate(state);
         getWindow().setStatusBarColor(0xff000000);
         getWindow().setNavigationBarColor(0xff000000);
@@ -37,6 +43,19 @@ public final class MainActivity extends NativeActivity {
             .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
             .setPrompt("Scan the QR code in RTC Sleeper on your laptop")
             .setBeepEnabled(false).setOrientationLocked(false).initiateScan());
+        return "";
+    }
+    public String enterPhrase() {
+        runOnUiThread(() -> {
+            android.widget.EditText entry = new android.widget.EditText(this);
+            entry.setHint("24-word pairing phrase");
+            entry.setMinLines(4);
+            entry.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+            entry.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+            new android.app.AlertDialog.Builder(this).setTitle("Pairing Phrase").setView(entry)
+                .setPositiveButton("Use phrase", (dialog, which) -> nativeScan(entry.getText().toString().trim()))
+                .setNegativeButton("Cancel", null).show();
+        });
         return "";
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
