@@ -73,7 +73,7 @@ adb shell am start -n com.mohamedbassem.rtcsleeper/.MainActivity
 
 Real off-network encrypted connectivity requires enrolling both nodes with a live Tailscale account and testing on separate networks. Local unit/emulator tests cannot replace that check.
 
-### Local validation for Android 0.1.0
+### Local validation for Android 0.1.1
 
 - Rust pairing/validation/authorization tests and the isolated loopback integration test passed; existing C++ engine/interface tests passed.
 - Built a signed universal release APK for arm64-v8a and x86_64, passed release lint and verified its APK signature.
