@@ -428,8 +428,12 @@ impl Mobile {
                     self.error = if e.contains("deadline")
                         || e.contains("timed out")
                         || e.contains("temporarily unavailable")
+                        || e.contains("(os error 11)")
+                        || e.contains("EOF while parsing")
+                        || e.contains("Broken pipe")
+                        || e.contains("reset by peer")
                     {
-                        "Laptop connection timed out. Refresh status to retry. No action was automatically repeated.".into()
+                        "Laptop connection timed out or was interrupted. Refresh status to retry. No action was automatically repeated.".into()
                     } else {
                         e
                     };
