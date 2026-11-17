@@ -87,6 +87,8 @@ adb shell am instrument -w com.mohamedbassem.rtcsleeper.test/androidx.test.runne
 
 `NetworkStartupTest` launches the real embedded node in the app UID, checks the public Android network snapshot, rejects any startup error and waits for `NeedsLogin` or `Running`. It does not enroll an account or send any scheduler request. CI runs this test on Android 11 before publishing APKs; only the release APK is attached to tagged releases.
 
+For 0.1.4 this regression passed locally on the Android 11/API 30 AOSP x86_64 emulator (`OK (1 test)`). Both ARM64 and x86_64 signed release binaries also built and the APK signature verified. The earlier API 29 smoke test did not cover Android 11's NETLINK_ROUTE restriction; the new instrumentation test explicitly requires API 30+.
+
 ### Local validation for Android 0.1.2
 
 - Rust pairing/validation/authorization tests and the isolated loopback integration test passed; existing C++ engine/interface tests passed.
