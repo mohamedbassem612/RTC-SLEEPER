@@ -64,6 +64,7 @@ public final class MainActivity extends NativeActivity {
         else super.onActivityResult(request, result, data);
     }
     public String libraryDirectory() { return getApplicationInfo().nativeLibraryDir; }
+    public String deviceName() { return (android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).substring(0, Math.min(70, (android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).length())); }
     public String openBrowser(String url) {
         if (!url.startsWith("https://login.tailscale.com/")) throw new IllegalArgumentException("Invalid login URL");
         runOnUiThread(() -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))));

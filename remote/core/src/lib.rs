@@ -46,7 +46,7 @@ impl PairTicket {
             ip,
             port,
             secret: random_hex(16),
-            expires: now() + 600,
+            expires: u64::MAX,
         }
     }
     fn bytes(&self) -> Result<Vec<u8>> {
@@ -149,22 +149,38 @@ impl Session {
 pub struct Store {
     pub sessions: Vec<Session>,
     pub seen: Vec<(String, u64)>,
+    #[serde(default)]
+    pub pairing: Option<PairTicket>,
+    #[serde(default)]
+    pub blocked: Vec<String>,
+    #[serde(default)]
+    pub remote_disabled: bool,
+}
+pub fn device_id(session: &Session) -> String {
+    hex::encode(Sha256::digest(session.token.as_bytes()))[..16].to_string()
 }
 pub trait Backend: Send {
     fn execute(&mut self, op: &str, payload: &Value, device: &str) -> Result<Value>;
 }
 pub struct Server<B: Backend> {
     pub store: Store,
-    pub ticket: Option<PairTicket>,
     pub backend: B,
 }
 impl<B: Backend> Server<B> {
     pub fn handle(&mut self, r: &Value) -> Result<Value> {
+        ensure!(
+            !self.store.remote_disabled,
+            "Remote access is disabled on the laptop"
+        );
         let op = r["op"].as_str().context("Missing operation")?;
         if op == "pair" {
             let supplied =
                 PairTicket::parse(r["code"].as_str().context("Missing pairing code")?, true)?;
-            let ticket = self.ticket.as_ref().context("No active pairing code")?;
+            let ticket = self
+                .store
+                .pairing
+                .as_ref()
+                .context("No active pairing code")?;
             ensure!(
                 ticket.expires > now()
                     && supplied.ip == ticket.ip
@@ -188,7 +204,7 @@ impl<B: Backend> Server<B> {
                 ip: ticket.ip,
                 port: ticket.port,
             };
-            self.ticket = None;
+            self.store.blocked.push(device_id(&session));
             self.store.sessions.push(session.clone());
             return Ok(serde_json::to_value(session)?);
         }
@@ -200,6 +216,10 @@ impl<B: Backend> Server<B> {
             .find(|s| same(&s.token, token))
             .context("Device not authorized")?
             .clone();
+        ensure!(
+            !self.store.blocked.contains(&device_id(&session)),
+            "Waiting for laptop approval, or device access is blocked. Use Settings > Remote Control > Allow selected on the laptop."
+        );
         let at = r["at"].as_u64().context("Missing command timestamp")?;
         ensure!(
             now().abs_diff(at) <= 30,
@@ -316,14 +336,16 @@ mod tests {
     }
     fn server() -> Server<Fake> {
         Server {
-            store: Store::default(),
-            ticket: Some(PairTicket::new("100.80.1.2".parse().unwrap(), PORT)),
+            store: Store {
+                pairing: Some(PairTicket::new("100.80.1.2".parse().unwrap(), PORT)),
+                ..Store::default()
+            },
             backend: Fake { writes: 0 },
         }
     }
     #[test]
     fn qr_and_phrase_same_ticket() {
-        let t = server().ticket.unwrap();
+        let t = server().store.pairing.unwrap();
         for code in [t.uri().unwrap(), t.phrase().unwrap()] {
             let p = PairTicket::parse(&code, false).unwrap();
             assert_eq!(p.secret, t.secret);
@@ -348,7 +370,7 @@ mod tests {
     }
     #[test]
     fn checksum_and_external_ip_rejected() {
-        let mut t = server().ticket.unwrap();
+        let mut t = server().store.pairing.unwrap();
         t.ip = "8.8.8.8".parse().unwrap();
         assert!(PairTicket::parse(&t.uri().unwrap(), false).is_err());
         assert!(PairTicket::parse("hello world", false).is_err());
@@ -356,12 +378,18 @@ mod tests {
         assert!(PairTicket::parse(&t.uri().unwrap(), true).is_err());
     }
     #[test]
-    fn pair_once_auth_and_replay() {
+    fn reusable_pairing_access_control_and_replay() {
         let mut s = server();
-        let code = s.ticket.as_ref().unwrap().phrase().unwrap();
+        let code = s.store.pairing.as_ref().unwrap().phrase().unwrap();
         let req = json!({"op":"pair","code":code,"device":"Android test"});
         let session: Session = serde_json::from_value(s.handle(&req).unwrap()).unwrap();
+        assert!(s.handle(&req).is_ok());
+        assert!(s.handle(&session.request("status", json!({}))).is_err());
+        s.store.blocked.clear();
+        s.store.remote_disabled = true;
         assert!(s.handle(&req).is_err());
+        assert!(s.handle(&session.request("status", json!({}))).is_err());
+        s.store.remote_disabled = false;
         let req = session.request("status", json!({}));
         assert!(s.handle(&req).is_ok());
         assert!(s.handle(&req).is_err());

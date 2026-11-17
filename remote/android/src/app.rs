@@ -232,7 +232,8 @@ impl Mobile {
             ip: ticket.ip,
             port: ticket.port,
         };
-        let r = json!({"op":"pair","code":self.phrase,"device":"RTC Sleeper Android"});
+        let name = java_string("deviceName", None).unwrap_or_else(|_| "Android phone".into());
+        let r = json!({"op":"pair","code":self.phrase,"device":name});
         let node = self.node.clone();
         let demo = self.demo;
         let tx = self.tx.clone();
@@ -403,7 +404,7 @@ impl eframe::App for Mobile {
                 if ui.button("Enter Pairing Phrase").clicked(){if let Err(e)=java_string("enterPhrase",None){self.error=e.to_string();}}
                 ui.label("Or enter the 24-word pairing phrase:");ui.add(egui::TextEdit::multiline(&mut self.phrase).hint_text("Paste pairing phrase or scanned QR link").desired_rows(5).desired_width(f32::INFINITY));
                 if ui.add_enabled(!self.busy,egui::Button::new("Pair Laptop").min_size(Vec2::new(ui.available_width(),46.))).clicked(){self.pair();}
-                ui.label("Codes expire after 10 minutes and work once. The laptop must be awake and online.");
+                ui.label("Pairing codes stay valid until regenerated on the laptop. The laptop controls access for each phone.");
             }else{
                 let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("Connecting").to_string();ui.heading(&status);ui.label(if online{"Laptop online"}else{"Laptop offline or sleeping — existing RTC wake still applies"});
                 if let Some(next)=self.state["next_sleep"].as_u64(){let seconds=next.saturating_sub(now());ui.label(format!("Will sleep in: {} h {} min {} s",seconds/3600,seconds/60%60,seconds%60));}

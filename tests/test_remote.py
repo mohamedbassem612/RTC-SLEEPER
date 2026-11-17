@@ -36,7 +36,7 @@ class RemoteIntegration(unittest.TestCase):
                         stream.settimeout(5); stream.connect(address)
                         stream.sendall(json.dumps(request).encode()+b'\n')
                         return json.loads(stream.makefile('rb').readline())
-                def local(op): return exchange(socket.AF_UNIX,str(control),{'op':op})['result']
+                def local(op, **fields): return exchange(socket.AF_UNIX,str(control),{'op':op, **fields})['result']
                 ticket = local('pair')
                 self.assertEqual(len(ticket['phrase'].split()), 24)
                 self.assertTrue(ticket['uri'].startswith('rtcsleeper://pair/'))
@@ -45,14 +45,33 @@ class RemoteIntegration(unittest.TestCase):
                 paired = exchange(socket.AF_INET,address,pair)
                 self.assertTrue(paired['ok'])
                 token = paired['result']['token']
-                self.assertFalse(exchange(socket.AF_INET,address,pair)['ok'])
+                self.assertTrue(exchange(socket.AF_INET,address,pair)['ok'])
+                self.assertEqual(local('pair')['phrase'],ticket['phrase'])
+                devices=local('devices')
+                self.assertTrue(devices['enabled'])
+                self.assertEqual(len(devices['devices']),2)
+                self.assertNotIn('token',json.dumps(devices))
                 def request(op,payload):
                     return {'op':op,'payload':payload,'token':token,'id':uuid.uuid4().hex,'at':int(time.time())}
                 def call(op,payload):
                     reply=exchange(socket.AF_INET,address,request(op,payload))
                     self.assertTrue(reply['ok'],reply.get('error'))
                     return reply['result']
+                self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
+                first=devices['devices'][0]['id']
+                local('allow',id=first)
                 self.assertEqual(call('status',{})['status'],'idle')
+                local('block',id=first)
+                self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
+                local('allow',id=first)
+                self.assertEqual(call('status',{})['status'],'idle')
+                local('disable')
+                self.assertFalse(exchange(socket.AF_INET,address,pair)['ok'])
+                self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
+                local('enable')
+                self.assertEqual(call('status',{})['status'],'idle')
+                local('regenerate')
+                self.assertFalse(exchange(socket.AF_INET,address,pair)['ok'])
                 cfg={'sleep_time':'23:00','wake_time':'07:00','now':False,'days':[0,1]}
                 self.assertEqual(call('schedule',cfg)['status'],'scheduled')
                 self.assertEqual(call('pause',{})['status'],'paused')
@@ -66,6 +85,27 @@ class RemoteIntegration(unittest.TestCase):
                 self.assertFalse(exchange(socket.AF_INET,address,request('shutdown',{}))['ok'])
                 cfg['wake_time']='73:00'
                 self.assertFalse(exchange(socket.AF_INET,address,request('schedule',cfg))['ok'])
+                saved=local('pair')['phrase']
+                local('block',id=first)
+                local('disable')
+                process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
+                process=subprocess.Popen([str(binary),'serve','--mock'],env=env,
+                                         stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+                for _ in range(100):
+                    try:
+                        access=local('devices')
+                        break
+                    except (OSError,KeyError): time.sleep(.05)
+                self.assertFalse(access['enabled'])
+                self.assertFalse(access['devices'][0]['allowed'])
+                self.assertEqual(local('pair')['phrase'],saved)
+                self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
+                local('enable')
+                self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
+                local('allow',id=first)
+                self.assertEqual(call('status',{})['status'],'idle')
                 local('revoke')
                 self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
                 self.assertEqual((control.stat().st_mode & 0o777),0o600)

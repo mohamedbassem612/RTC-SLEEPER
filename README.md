@@ -8,6 +8,8 @@ The original working Python/GTK release is preserved on the [`python-version`](h
 
 An Android remote-control app written in Rust is under `remote/android` and `android/`. It embeds Tailscale, pairs with the laptop using a QR code or a 24-word phrase, and uses the existing C++ scheduler through an unprivileged companion. Setup, builds, signing and safe mock testing: [Android guide](docs/ANDROID.md).
 
+In **Settings → Remote Control**, the laptop displays its persistent QR/phrase, lists paired phones and controls access separately for each one. New phones require approval there. A global animated switch can disable all remote access. Pairing codes stay valid until regenerated; access decisions survive service restarts.
+
 ## Features
 
 - Fixed 1000 × 720 desktop window, black backgrounds and white accents.

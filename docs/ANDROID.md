@@ -16,11 +16,13 @@ The Android UI, pairing protocol, validation and remote client are Rust. A small
 
 3. In the desktop app select **Settings → Remote Control → Sign in to private network**. Authenticate in your browser with your Tailscale account, then refresh the connection.
 4. Install the signed Android APK. Open RTC Sleeper, sign into the **same tailnet**, then return to the app.
-5. On the desktop choose **New pairing code**. On Android choose **Scan QR Code**, or enter/paste the **24-word pairing phrase**, then select **Pair Laptop**.
+5. On the desktop open **Settings → Remote Control**. The QR and **24-word pairing phrase** appear automatically once connected. On Android choose **Scan QR Code**, or enter/paste the phrase, then select **Pair Laptop**. Select the new phone in the desktop list and click **Allow selected**. Until approved, it cannot read status or send commands. Use the same QR/phrase to add another phone; each needs separate approval.
 
 Tailscale enrollment and application pairing are separate. The QR/phrase authorizes this phone to control this laptop; it does not contain a Tailscale auth key or bypass network enrollment. Camera permission is requested only when scanning. Phrase entry works without a camera.
 
-The desktop code expires after 10 minutes and is consumed after one successful pairing. Creating another code invalidates the previous one. Codes encode a version, Tailscale IPv4 address, port, 128-bit random secret, expiry and checksum. The word encoding uses the BIP39 English vocabulary but is **not a cryptocurrency wallet mnemonic**. A successful pairing issues a separate 256-bit device token; Android encrypts it using Android Keystore AES-GCM, and app backup is disabled.
+The desktop code is reusable, has no time limit and survives service restarts. **Show QR / pairing phrase** displays the existing code; **Regenerate pairing code** replaces it without disconnecting existing phones. Codes encode a version, Tailscale IPv4 address, port, 128-bit random secret, a non-expiring marker and checksum. The word encoding uses the BIP39 English vocabulary but is **not a cryptocurrency wallet mnemonic**. Each successful pairing issues a separate 256-bit device token; Android encrypts it using Android Keystore AES-GCM, and app backup is disabled. Existing Android 0.1.2 clients accept the new codes.
+
+The desktop is the access authority. **Settings → Remote Control** lists paired devices with separate IDs and allowed/blocked states. Select a device and use **Allow selected** or **Block selected**; a blocked phone's existing token immediately stops working. **Remote access: OFF** rejects all remote requests, including new pairings, without logging the laptop out of Tailscale. Permissions and the global switch survive service restarts. These administration operations are available only through the laptop's private local control socket, not the mobile protocol.
 
 **Revoke all paired phones** invalidates all device tokens on the laptop. Forgetting a laptop on the phone removes its local credential; revoke it on the laptop as well to invalidate server-side access.
 

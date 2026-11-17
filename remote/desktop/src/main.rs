@@ -169,13 +169,13 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) != Some("serve") {
         let op = args.first().map(String::as_str).unwrap_or("status");
         ensure!(
-            ["status", "login", "pair", "revoke"].contains(&op),
-            "Use serve | status | login | pair | revoke"
+            ["status", "login", "pair", "regenerate", "revoke", "devices", "block", "allow", "enable", "disable"].contains(&op),
+            "Use serve | status | login | pair | regenerate | revoke | devices | block ID | allow ID | enable | disable"
         );
         let mut stream = UnixStream::connect(&socket)
             .context("Remote service is not running. Start rtc-sleeper-remote serve")?;
         stream.set_read_timeout(Some(Duration::from_secs(8)))?;
-        let out = exchange(&mut stream, &json!({"op":op}))?;
+        let out = exchange(&mut stream, &json!({"op":op,"id":args.get(1)}))?;
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -201,7 +201,6 @@ fn main() -> Result<()> {
     };
     let server = Arc::new(Mutex::new(Server {
         store,
-        ticket: None,
         backend: Laptop {
             mock,
             state: json!({"status":"idle","config":null,"actual_alarm":null,"engine_running":true}),
@@ -248,6 +247,31 @@ fn main() -> Result<()> {
                         };
                         match r["op"].as_str().unwrap_or("") {
                             "status" => Ok(status),
+                            "devices" => {
+                                let s = server.lock().unwrap();
+                                Ok(
+                                    json!({"enabled":!s.store.remote_disabled,"devices":s.store.sessions.iter().map(|v|json!({"id":device_id(v),"name":v.device,"allowed":!s.store.blocked.contains(&device_id(v))})).collect::<Vec<_>>()}),
+                                )
+                            }
+                            "enable" | "disable" | "block" | "allow" => {
+                                let mut s = server.lock().unwrap();
+                                let op = r["op"].as_str().unwrap();
+                                if op == "enable" || op == "disable" {
+                                    s.store.remote_disabled = op == "disable";
+                                } else {
+                                    let id = r["id"].as_str().context("Provide a device ID")?;
+                                    ensure!(
+                                        s.store.sessions.iter().any(|v| device_id(v) == id),
+                                        "Unknown device"
+                                    );
+                                    s.store.blocked.retain(|v| v != id);
+                                    if op == "block" {
+                                        s.store.blocked.push(id.into());
+                                    }
+                                }
+                                private_write(&store_path, &serde_json::to_vec(&s.store)?)?;
+                                Ok(json!({"updated":true}))
+                            }
                             "login" => {
                                 node.as_ref().context("Mock does not need login")?.login()?;
                                 Ok(json!({"message":"Login requested; refresh status"}))
@@ -255,11 +279,12 @@ fn main() -> Result<()> {
                             "revoke" => {
                                 let mut s = server.lock().unwrap();
                                 s.store.sessions.clear();
-                                s.ticket = None;
+                                s.store.pairing = None;
+                                s.store.blocked.clear();
                                 private_write(&store_path, &serde_json::to_vec(&s.store)?)?;
                                 Ok(json!({"revoked":true}))
                             }
-                            "pair" => {
+                            "pair" | "regenerate" => {
                                 let ip: Ipv4Addr = status["TailscaleIPs"]
                                     .as_array()
                                     .and_then(|v| {
@@ -268,9 +293,17 @@ fn main() -> Result<()> {
                                             .find_map(|s| s.parse::<Ipv4Addr>().ok())
                                     })
                                     .context("Sign in to Tailscale before pairing")?;
-                                let ticket = PairTicket::new(ip, port);
-                                let out = json!({"uri":ticket.uri()?,"phrase":ticket.phrase()?,"expires":ticket.expires,"qr_png":base64::engine::general_purpose::STANDARD.encode(ticket.qr_png()?)});
-                                server.lock().unwrap().ticket = Some(ticket);
+                                let mut s = server.lock().unwrap();
+                                if r["op"] == "regenerate"
+                                    || s.store.pairing.as_ref().is_none_or(|t| {
+                                        t.ip != ip || t.port != port || t.expires != u64::MAX
+                                    })
+                                {
+                                    s.store.pairing = Some(PairTicket::new(ip, port));
+                                }
+                                let ticket = s.store.pairing.as_ref().unwrap();
+                                let out = json!({"uri":ticket.uri()?,"phrase":ticket.phrase()?,"expires":null,"qr_png":base64::engine::general_purpose::STANDARD.encode(ticket.qr_png()?)});
+                                private_write(&store_path, &serde_json::to_vec(&s.store)?)?;
                                 Ok(out)
                             }
                             _ => bail!("Unknown local operation"),

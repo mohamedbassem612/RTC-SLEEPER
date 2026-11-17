@@ -10,6 +10,7 @@
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QLocale>
 #include <QMessageBox>
 #include <QPainter>
@@ -773,14 +774,14 @@ void Window::logsDialog() {
 void Window::remoteDialog() {
     QDialog d(this);
     d.setWindowTitle(text("Remote Control · Android", "التحكم عن بعد · أندرويد"));
-    d.resize(640, 700);
+    d.resize(720, 830);
     auto *l = new QVBoxLayout(&d);
     auto *status = label("", "muted");
     status->setWordWrap(true);
     l->addWidget(status);
     auto *signIn = button(text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
     l->addWidget(signIn);
-    auto *generate = button(text("New pairing code", "إنشاء كود اقتران"), "primary");
+    auto *generate = button(text("Show QR / pairing phrase", "عرض QR / عبارة الاقتران"), "primary");
     l->addWidget(generate);
     auto *qr = new QLabel;
     qr->setAlignment(Qt::AlignCenter);
@@ -790,23 +791,45 @@ void Window::remoteDialog() {
     phrase->setMaximumHeight(100);
     l->addWidget(phrase);
     auto *instructions =
-        label(text("Scan the QR or enter the phrase in the Android app. Codes expire in 10 minutes "
-                   "and work once.",
-                   "امسح QR أو أدخل العبارة في تطبيق أندرويد. الكود صالح 10 دقائق ولمرة واحدة."),
+        label(text("Scan this QR or enter the phrase on another phone. It stays valid until regenerated. Each new phone needs Allow selected below before controlling this laptop.",
+                   "امسح QR أو أدخل العبارة على هاتف آخر. الكود ثابت لحد ما تغيّره. لازم تسمح لكل هاتف جديد من القائمة بالأسفل."),
               "muted");
     instructions->setWordWrap(true);
     l->addWidget(instructions);
     auto *refresh = button(text("Refresh connection", "تحديث الاتصال"));
     l->addWidget(refresh);
+    auto *accessRow = new QHBoxLayout;
+    auto *accessLabel = label(text("Remote access", "السماح بالتحكم عن بعد"));
+    auto *enabled = new ToggleSwitch;
+    enabled->setAccessibleName(text("Allow remote access", "السماح بالتحكم عن بعد"));
+    accessRow->addWidget(accessLabel);
+    accessRow->addStretch();
+    accessRow->addWidget(enabled);
+    l->addLayout(accessRow);
+    auto *deviceHeading = label(text("Paired devices", "الأجهزة المقترنة"), "heading");
+    l->addWidget(deviceHeading);
+    auto *devices = new QListWidget;
+    devices->setMinimumHeight(90);
+    l->addWidget(devices);
+    auto *permissions = new QHBoxLayout;
+    auto *allow = button(text("Allow selected", "السماح للجهاز المحدد"));
+    auto *block = button(text("Block selected", "منع الجهاز المحدد"));
+    auto *regenerate = button(text("Regenerate pairing code", "تغيير كود الاقتران"));
+    permissions->addWidget(allow);
+    permissions->addWidget(block);
+    permissions->addWidget(regenerate);
+    l->addLayout(permissions);
     auto *revoke = button(text("Revoke all paired phones", "إلغاء صلاحية كل الهواتف"));
     l->addWidget(revoke);
     QString loginUrl;
-    auto request = [&](const QString &op) {
+    auto request = [&](const QString &op, const QString &id = QString()) {
         auto executable = QStandardPaths::findExecutable("rtc-sleeper-remote");
         if (executable.isEmpty())
             executable = QDir::homePath() + "/.local/bin/rtc-sleeper-remote";
         QProcess p;
-        p.start(executable, {op});
+        QStringList arguments{op};
+        if (!id.isEmpty()) arguments << id;
+        p.start(executable, arguments);
         if (!p.waitForStarted(1500) || !p.waitForFinished(9000)) {
             p.kill();
             p.waitForFinished();
@@ -833,12 +856,35 @@ void Window::remoteDialog() {
                              "سجّل الدخول بنفس حساب Tailscale المستخدم في تطبيق أندرويد."));
             generate->setEnabled(ready);
             signIn->setEnabled(!ready);
+            auto access = request("devices");
+            enabled->setChecked(access["enabled"].toBool());
+            accessLabel->setText(access["enabled"].toBool() ? text("Remote access: ON", "التحكم عن بعد: مفعّل") : text("Remote access: OFF", "التحكم عن بعد: متوقف"));
+            deviceHeading->setText(access["devices"].toArray().isEmpty() ? text("Paired devices — none yet", "الأجهزة المقترنة — لا يوجد بعد") : text("Paired devices", "الأجهزة المقترنة"));
+            QString selected = devices->currentItem() ? devices->currentItem()->data(Qt::UserRole).toString() : QString();
+            devices->clear();
+            for (const auto &v : access["devices"].toArray()) {
+                auto device = v.toObject();
+                auto *item = new QListWidgetItem(device["name"].toString() + " · " + (device["allowed"].toBool() ? text("Allowed", "مسموح") : text("Blocked", "ممنوع")) + " · " + device["id"].toString(), devices);
+                item->setData(Qt::UserRole, device["id"].toString());
+                if (device["id"].toString()==selected) devices->setCurrentItem(item);
+            }
         } catch (const std::exception &e) {
             status->setText(e.what());
             generate->setEnabled(false);
         }
     };
     connect(refresh, &QPushButton::clicked, &d, update);
+    connect(enabled, &QAbstractButton::clicked, &d, [&] {
+        try { request(enabled->isChecked() ? "enable" : "disable"); update(); }
+        catch (const std::exception &e) {status->setText(e.what());}
+    });
+    auto changeAccess = [&](const QString &op) {
+        if (!devices->currentItem()) return;
+        try {request(op, devices->currentItem()->data(Qt::UserRole).toString()); update();}
+        catch (const std::exception &e) {status->setText(e.what());}
+    };
+    connect(allow, &QPushButton::clicked, &d, [&] {changeAccess("allow");});
+    connect(block, &QPushButton::clicked, &d, [&] {changeAccess("block");});
     connect(signIn, &QPushButton::clicked, &d, [&] {
         try {
             request("login");
@@ -852,17 +898,19 @@ void Window::remoteDialog() {
             status->setText(e.what());
         }
     });
-    connect(generate, &QPushButton::clicked, &d, [&] {
+    auto showPairing = [&](const QString &op) {
         try {
-            auto ticket = request("pair");
+            auto ticket = request(op);
             QPixmap image;
             image.loadFromData(QByteArray::fromBase64(ticket["qr_png"].toString().toUtf8()), "PNG");
-            qr->setPixmap(image.scaled(260, 260, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            qr->setPixmap(image.scaled(220, 220, Qt::KeepAspectRatio, Qt::FastTransformation));
             phrase->setPlainText(ticket["phrase"].toString());
         } catch (const std::exception &e) {
             status->setText(e.what());
         }
-    });
+    };
+    connect(generate, &QPushButton::clicked, &d, [&] {showPairing("pair");});
+    connect(regenerate, &QPushButton::clicked, &d, [&] {showPairing("regenerate");});
     connect(revoke, &QPushButton::clicked, &d, [&] {
         if (QMessageBox::question(&d, text("Revoke phones?", "إلغاء صلاحية الهواتف؟"),
                                   text("All paired phones will need a new pairing code.",
@@ -878,6 +926,10 @@ void Window::remoteDialog() {
         }
     });
     update();
+    if (generate->isEnabled()) showPairing("pair");
+    QTimer refreshDevices;
+    connect(&refreshDevices, &QTimer::timeout, &d, update);
+    refreshDevices.start(5000);
     d.exec();
 }
 void Window::settingsDialog() {
