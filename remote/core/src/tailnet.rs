@@ -14,6 +14,18 @@ use std::{
     time::Duration,
 };
 
+/// Refuse to load a native library that other users could have replaced.
+fn verify_library(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).context("Embedded Tailscale library is missing")?;
+    ensure!(meta.is_file(), "Embedded Tailscale library is not a file");
+    ensure!(
+        meta.permissions().mode() & 0o022 == 0,
+        "Embedded Tailscale library must not be group or world writable"
+    );
+    Ok(())
+}
+
 pub struct TailNode {
     lib: Arc<Library>,
     id: c_int,
@@ -36,6 +48,7 @@ impl TailNode {
         name: &str,
         network: Option<&str>,
     ) -> Result<Arc<Self>> {
+        verify_library(library)?;
         std::fs::create_dir_all(state)?;
         #[cfg(unix)]
         {

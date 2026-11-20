@@ -28,6 +28,7 @@ QString run(const QString &program, const QStringList &args, int timeout = 35000
 class Engine {
     QString root_;
     Host &host_;
+    QJsonObject stateOrRecover();
     void save(QJsonObject s);
     void clearOwned(QJsonObject &s);
     void arm(QJsonObject &s, qint64 stamp, bool replace = false);

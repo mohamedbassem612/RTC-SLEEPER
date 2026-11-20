@@ -11,6 +11,7 @@
 #include <QVariantAnimation>
 #include <QWidget>
 #include <functional>
+#include <future>
 namespace Sleeper {
 class ToggleSwitch : public QAbstractButton {
     Q_OBJECT
@@ -40,7 +41,9 @@ class TimeInput : public QFrame {
 class Window : public QWidget {
     Client &client_;
     QSettings settings_;
-    bool arabic_ = false, editing_ = false, building_ = false;
+    bool arabic_ = false, editing_ = false, building_ = false, busy_ = false, dropPending_ = false;
+    std::future<QJsonObject> pending_;
+    qint64 lastStatus_ = 0;
     QJsonObject state_, last_, snapshot_;
     QStackedWidget *pages_{};
     QWidget *form_{}, *dashboard_{}, *sleepRow_{}, *repeatRow_{};
@@ -53,6 +56,9 @@ class Window : public QWidget {
     QWidget *makeForm();
     QWidget *makeDashboard();
     void build();
+    void autoRefresh();
+    void applyStatus(QJsonObject fresh);
+    QJsonObject runBlocking(std::function<QJsonObject()> fn);
     void switchPage(QWidget *page, bool animate = true);
     void setConfig(QJsonObject c);
     QJsonObject config() const;

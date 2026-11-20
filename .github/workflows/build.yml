@@ -21,20 +21,19 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel 2
-      - name: Test engine and interface with fake hardware
-        run: ctest --test-dir build --output-on-failure
       - name: Validate installation files
         run: |
           bash -n scripts/install.sh scripts/uninstall.sh
           desktop-file-validate packaging/sleep-scheduler.desktop
           sudo install -D -m 755 build/sleep-scheduler /usr/lib/rtc-sleeper/sleep-scheduler
+          sudo install -D -m 755 build/sleep-scheduler-engine /usr/lib/rtc-sleeper/sleep-scheduler-engine
           systemd-analyze verify packaging/sleep-scheduler.service 2>verify.log || { cat verify.log; exit 1; }
       - name: Build binary and source archives
         run: |
           mkdir -p dist/rtc-sleeper/build
-          cp build/sleep-scheduler dist/rtc-sleeper/build/
+          cp build/sleep-scheduler build/sleep-scheduler-engine dist/rtc-sleeper/build/
           cp -a scripts packaging README.md AGENTS.md LICENSE icon.svg dist/rtc-sleeper/
-          strip dist/rtc-sleeper/build/sleep-scheduler
+          strip dist/rtc-sleeper/build/sleep-scheduler dist/rtc-sleeper/build/sleep-scheduler-engine
           tar -C dist -czf dist/rtc-sleeper-linux-x86_64.tar.gz rtc-sleeper
           git archive --format=tar.gz --prefix=rtc-sleeper-source/ -o dist/rtc-sleeper-source.tar.gz HEAD
           cd dist

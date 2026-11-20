@@ -64,7 +64,9 @@ class InterfaceTests : public QObject {
         QVERIFY(!w.findChild<ToggleSwitch *>("repeatDay0")->isEnabled());
         now->setChecked(false);
         QVERIFY(row->isEnabled());
-        QCOMPARE(w.minimumSize(), w.maximumSize());
+        // Window may shrink to 660 px tall for small screens but never below the layout minimum.
+        QCOMPARE(w.minimumSize(), QSize(1000, 660));
+        QVERIFY(w.height() >= 660 && w.height() <= 720);
     }
     void togglesAnimateAndSupportKeyboard() {
         ToggleSwitch toggle;

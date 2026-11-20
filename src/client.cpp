@@ -1,7 +1,9 @@
 #include "client.h"
 #include <QFile>
 #include <QJsonDocument>
+#include <QDateTime>
 #include <QProcess>
+#include <mutex>
 namespace Sleeper {
 QJsonObject userActor(QString source) {
     return {{"kind", "user"}, {"name", "User"}, {"model", ""}, {"source", source}};
@@ -16,10 +18,26 @@ QJsonObject Client::status() {
     } catch (...) {
         s["rtc_readable"] = false;
     }
-    QProcess p;
-    p.start("/usr/bin/systemctl", {"is-active", "sleep-scheduler.service"});
-    p.waitForFinished(2500);
-    bool running = p.readAllStandardOutput().trimmed() == "active";
+    // The GUI polls status every few seconds; spawning systemctl each time is wasteful, so the
+    // answer is cached briefly. Safe to call from a worker thread.
+    static std::mutex probeLock;
+    static qint64 probedAt = 0;
+    static bool cachedRunning = false;
+    bool running;
+    {
+        std::lock_guard<std::mutex> guard(probeLock);
+        auto now = QDateTime::currentSecsSinceEpoch();
+        if (now - probedAt >= 2) {
+            QProcess p;
+            p.start("/usr/bin/systemctl", {"is-active", "sleep-scheduler.service"});
+            cachedRunning =
+                p.waitForFinished(1500) && p.readAllStandardOutput().trimmed() == "active";
+            if (p.state() != QProcess::NotRunning)
+                p.kill();
+            probedAt = now;
+        }
+        running = cachedRunning;
+    }
     s["engine_running"] = running;
     if (s["status"] == "scheduled") {
         if (!running) {

@@ -33,6 +33,8 @@ class Lock {
             fail("Cannot lock scheduler state.");
         }
     }
+    Lock(const Lock &) = delete;
+    Lock &operator=(const Lock &) = delete;
     ~Lock() {
         if (fd_ >= 0) {
             flock(fd_, LOCK_UN);
@@ -51,12 +53,33 @@ void timeValid(const QJsonValue &v) {
     if (!v.isString() || !re.match(v.toString()).hasMatch())
         fail("Time must be HH:MM in 24-hour format (00:00–23:59).");
 }
-qint64 localStamp(QDate d, QString time) {
+// A local time that does not exist (spring-forward gap) is skipped for sleep times. A wake time
+// is moved to the first valid instant after the gap (15-minute steps, so it can only be early,
+// never late) instead of slipping a whole day.
+qint64 localStamp(QDate d, QString time, bool acceptGap = false) {
     auto t = QTime::fromString(time, "HH:mm");
     QDateTime stamp(d, t, Qt::LocalTime);
-    if (!stamp.isValid() || stamp.date() != d || stamp.time() != t)
+    if (!stamp.isValid() && acceptGap)
+        for (int i = 1; i <= 12 && !stamp.isValid(); ++i) {
+            auto moved = t.addSecs(i * 900);
+            if (moved < t)
+                break; // wrapped past midnight
+            stamp = QDateTime(d, moved, Qt::LocalTime);
+        }
+    if (!stamp.isValid() || stamp.date() != d || (!acceptGap && stamp.time() != t))
         return -1;
     return stamp.toSecsSinceEpoch();
+}
+// Use the first RTC that exposes a wake alarm instead of assuming rtc0.
+QString rtcName() {
+    static const QString name = [] {
+        QDir dir("/sys/class/rtc");
+        for (const auto &n : dir.entryList({"rtc*"}, QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+            if (QFile::exists(dir.filePath(n + "/wakealarm")))
+                return n;
+        return QStringLiteral("rtc0");
+    }();
+    return name;
 }
 } // namespace
 QJsonValue jsonAlarm(Alarm a) {
@@ -95,7 +118,7 @@ qint64 Host::now() const {
     return QDateTime::currentSecsSinceEpoch();
 }
 Alarm Host::alarm() const {
-    QFile f("/sys/class/rtc/rtc0/wakealarm");
+    QFile f("/sys/class/rtc/" + rtcName() + "/wakealarm");
     if (!f.open(QIODevice::ReadOnly))
         fail("Cannot read RTC wake alarm.");
     const auto value = f.readAll().trimmed();
@@ -108,10 +131,11 @@ Alarm Host::alarm() const {
     return n;
 }
 void Host::arm(qint64 stamp) {
-    run("/usr/sbin/rtcwake", {"-m", "no", "-t", QString::number(stamp)});
+    run("/usr/sbin/rtcwake",
+        {"-d", "/dev/" + rtcName(), "-m", "no", "-t", QString::number(stamp)});
 }
 void Host::clear() {
-    run("/usr/sbin/rtcwake", {"-m", "disable"});
+    run("/usr/sbin/rtcwake", {"-d", "/dev/" + rtcName(), "-m", "disable"});
 }
 void Host::suspend() {
     run("/usr/bin/systemctl", {"--no-block", "suspend"});
@@ -162,7 +186,7 @@ std::pair<qint64, qint64> nextCycle(const QJsonObject &c, qint64 now, QDate afte
         fail("Could not find the next valid sleep date.");
     auto sleepDay = QDateTime::fromSecsSinceEpoch(sleep).date();
     for (int i = 0; i < 4; i++) {
-        auto wake = localStamp(sleepDay.addDays(i), c["wake_time"].toString());
+        auto wake = localStamp(sleepDay.addDays(i), c["wake_time"].toString(), true);
         if (wake > sleep + 15)
             return {sleep, wake};
     }
@@ -180,6 +204,24 @@ QJsonObject Engine::state() const {
     if (e.error != QJsonParseError::NoError || !d.isObject())
         fail("Corrupt scheduler state.");
     return d.object();
+}
+QJsonObject Engine::stateOrRecover() {
+    try {
+        return state();
+    } catch (const std::exception &e) {
+        // A damaged state file must not wedge the engine forever: keep it aside, start idle.
+        if (QString(e.what()) != "Corrupt scheduler state.")
+            throw;
+        QFile f(root_ + "/state.json");
+        auto backup = root_ + "/state.corrupt." + QString::number(host_.now());
+        if (!f.rename(backup))
+            throw;
+        try {
+            event("state_recovered", {{"result", "recovered"}, {"backup", backup}});
+        } catch (...) {
+        }
+        return idleState();
+    }
 }
 void Engine::save(QJsonObject s) {
     s["updated"] = host_.now();
@@ -252,7 +294,7 @@ QJsonObject Engine::control(const QJsonObject &r, qint64 uid) {
     auto op = r["op"].toString();
     auto p = r["payload"].toObject();
     Lock lock(root_);
-    auto s = state();
+    auto s = stateOrRecover();
     try {
         if (s["status"] == "sleeping")
             fail("Suspend is already in progress; wait for resume.");
@@ -315,8 +357,11 @@ QJsonObject Engine::control(const QJsonObject &r, qint64 uid) {
         } else
             fail("Unsupported operation.");
     } catch (const std::exception &e) {
-        event("request_failed",
-              {{"actor", actor}, {"operation", op}, {"result", "error"}, {"error", e.what()}});
+        try {
+            event("request_failed",
+                  {{"actor", actor}, {"operation", op}, {"result", "error"}, {"error", e.what()}});
+        } catch (...) {
+        }
         throw;
     }
     return s;
@@ -342,7 +387,7 @@ void Engine::finish(QJsonObject &s, const QString &reason) {
             s["next_wake"] = cycle.second;
             s["status"] = "scheduled";
             s["scheduled_at"] = host_.now();
-            s["cycle"] = QUuid::createUuid().toString();
+            s["cycle"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
             event("repeat_scheduled", {{"created_by", s["actor"]},
                                        {"next_sleep", cycle.first},
                                        {"next_wake", cycle.second}});
@@ -359,11 +404,20 @@ void Engine::finish(QJsonObject &s, const QString &reason) {
 }
 void Engine::tick() {
     Lock lock(root_);
-    auto s = state();
+    auto s = stateOrRecover();
     try {
         auto actual = host_.alarm();
         bool changed = s["actual_alarm"] != jsonAlarm(actual);
         s["actual_alarm"] = jsonAlarm(actual);
+        if (s["status"] == "sleeping") {
+            // Suspend was requested but the resume hook never ran (suspend failed after being
+            // queued, or the hook is missing). Do not stay locked in "sleeping" forever.
+            auto at = s["trigger"].toObject()["at"].toInteger();
+            if (host_.now() - at > 120) {
+                finish(s, "sleep_watchdog");
+                return;
+            }
+        }
         if (s["status"] == "scheduled") {
             if (actual != alarmValue(s["expected_alarm"])) {
                 s["status"] = "conflict";
@@ -407,8 +461,13 @@ void Engine::tick() {
 }
 void Engine::resumed() {
     Lock lock(root_);
-    auto s = state();
-    if (QStringList{"scheduled", "sleeping"}.contains(s["status"].toString()))
+    auto s = stateOrRecover();
+    auto status = s["status"].toString();
+    // Only a resume that follows the scheduled sleep (or one this engine triggered) completes
+    // the cycle. A manual suspend before the sleep time must not cancel the schedule.
+    bool due = status == "sleeping" ||
+               (status == "scheduled" && host_.now() >= s["next_sleep"].toInteger());
+    if (due)
         finish(s, "system_resumed");
     else {
         s["last_resume"] = host_.now();
@@ -418,7 +477,7 @@ void Engine::resumed() {
 }
 void Engine::startup() {
     Lock lock(root_);
-    auto s = state();
+    auto s = stateOrRecover();
     if (s["status"] == "sleeping")
         finish(s, "engine_restarted");
     else

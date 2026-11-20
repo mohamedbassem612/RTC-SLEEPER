@@ -1,4 +1,5 @@
 #include "engine.h"
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -152,14 +153,99 @@ class Tests : public QObject {
         QVERIFY(h.rtc);
     }
     void earlyWakeReset() {
+        // Woken manually after the scheduled sleep: the cycle is complete and resets.
         QTemporaryDir dir;
         FakeHost h;
         Engine e(dir.path(), h);
-        e.control(schedule(), 1000);
+        auto s = e.control(schedule(), 1000);
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        QCOMPARE(h.sleeps, 1);
         e.resumed();
         QCOMPARE(e.state()["status"].toString(), "idle");
         QVERIFY(e.state()["config"].isNull());
         QVERIFY(!h.rtc);
+    }
+    void manualSuspendBeforeDeadlineKeepsSchedule() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(schedule(), 1000);
+        h.clock += 3600; // unrelated suspend/resume hours before the sleep time
+        e.resumed();
+        QCOMPARE(e.state()["status"].toString(), "scheduled");
+        QCOMPARE(e.state()["next_sleep"].toInteger(), s["next_sleep"].toInteger());
+        QVERIFY(h.rtc);
+        QVERIFY(!e.state()["last_resume"].isNull());
+    }
+    void resumeAfterDeadlineWithoutTickResets() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(schedule(), 1000);
+        h.clock = s["next_sleep"].toInteger() + 10;
+        e.resumed();
+        QCOMPARE(e.state()["status"].toString(), "idle");
+    }
+    void sleepingWatchdog() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(schedule(), 1000);
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        QCOMPARE(e.state()["status"].toString(), "sleeping");
+        h.clock += 60;
+        e.tick();
+        QCOMPARE(e.state()["status"].toString(), "sleeping");
+        h.clock += 120; // the resume hook never ran
+        e.tick();
+        QCOMPARE(e.state()["status"].toString(), "idle");
+        e.control(schedule(), 1000); // usable again
+    }
+    void corruptStateRecovers() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        e.control(schedule(), 1000);
+        QFile f(dir.path() + "/state.json");
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write("{not json");
+        f.close();
+        e.tick();
+        QCOMPARE(e.state()["status"].toString(), "idle");
+        QVERIFY(!QDir(dir.path()).entryList({"state.corrupt.*"}).isEmpty());
+        // The old alarm can no longer be proven ours, so replacing it needs explicit consent.
+        e.control(schedule(cfg(), true), 1000);
+        QCOMPARE(e.state()["status"].toString(), "scheduled");
+    }
+    void cycleIdFormatConsistent() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto c = cfg();
+        c["days"] = QJsonArray{0, 1, 2, 3, 4, 5, 6};
+        auto s = e.control(schedule(c), 1000);
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        e.resumed();
+        QVERIFY(!e.state()["cycle"].toString().contains('{'));
+    }
+    void wakeInsideDstGapDoesNotSlipADay() {
+        auto old = qgetenv("TZ");
+        qputenv("TZ", "America/New_York");
+        tzset();
+        auto c = cfg();
+        c["wake_time"] = "02:30"; // does not exist on 2026-03-08
+        auto now = QDateTime(QDate(2026, 3, 7), QTime(9, 0), Qt::LocalTime).toSecsSinceEpoch();
+        auto cycle = nextCycle(c, now);
+        QCOMPARE(QDateTime::fromSecsSinceEpoch(cycle.second).date(), QDate(2026, 3, 8));
+        QVERIFY(cycle.second - cycle.first < 6 * 3600);
+        if (old.isNull())
+            qunsetenv("TZ");
+        else
+            qputenv("TZ", old);
+        tzset();
     }
     void repeatNextDay() {
         QTemporaryDir dir;
@@ -168,9 +254,13 @@ class Tests : public QObject {
         auto c = cfg();
         c["days"] = QJsonArray{0, 1, 2, 3, 4, 5, 6};
         auto s = e.control(schedule(c), 1000);
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        QCOMPARE(h.sleeps, 1);
         e.resumed();
         QVERIFY(e.state()["next_sleep"].toInteger() > s["next_sleep"].toInteger());
-        QCOMPARE(h.sleeps, 0);
+        QCOMPARE(e.state()["status"].toString(), "scheduled");
+        QCOMPARE(h.sleeps, 1);
     }
     void missedDeadline() {
         QTemporaryDir dir;

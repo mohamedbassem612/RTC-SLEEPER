@@ -34,7 +34,7 @@ pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeConn
     let state = CONNECTION_TEST_STATE
         .get_or_init(Default::default)
         .lock()
-        .unwrap();
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     env.new_string(state.as_str()).unwrap().into_raw()
 }
 
@@ -47,7 +47,7 @@ pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeDial
     let node = TEST_NODE
         .get_or_init(Default::default)
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let started = Instant::now();
     let error = node
@@ -70,7 +70,7 @@ pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeNetw
     let state = NETWORK_TEST_STATE
         .get_or_init(Default::default)
         .lock()
-        .unwrap();
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     env.new_string(state.as_str())
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
@@ -80,7 +80,7 @@ fn activity() -> Result<AndroidApp> {
     ACTIVITY
         .get_or_init(Default::default)
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .context("Activity unavailable")
 }
@@ -95,7 +95,7 @@ pub extern "system" fn Java_com_mohamedbassem_rtcsleeper_MainActivity_nativeScan
         INPUT
             .get_or_init(Default::default)
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(s.into());
     }
 }
@@ -136,9 +136,31 @@ enum Message {
     Network(Value),
     NetworkInfo(Value),
     Paired(Session),
-    Status(Value),
+    /// value, request sequence number, started by the background poller
+    Status(Value, u64, bool),
     Logs(Value),
-    Error(String),
+    /// text, transient network hiccup, started by the background poller
+    Error(String, bool, bool),
+}
+/// Typed check instead of matching error text.
+fn transient(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::*;
+    e.chain().any(|cause| {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                TimedOut | WouldBlock | ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof | Interrupted
+            ) || io.raw_os_error() == Some(11);
+        }
+        if let Some(j) = cause.downcast_ref::<serde_json::Error>() {
+            return j.is_eof();
+        }
+        false
+    }) || {
+        // The embedded Go network layer reports its own timeouts as plain text only.
+        let text = e.to_string();
+        text.contains("deadline") || text.contains("timed out")
+    }
 }
 struct Mobile {
     node: Option<Arc<TailNode>>,
@@ -147,7 +169,13 @@ struct Mobile {
     network: Value,
     tx: Sender<Message>,
     rx: Receiver<Message>,
+    /// A user-started action (pairing, apply, pause...) is running. Shows the spinner.
     busy: bool,
+    /// A silent background refresh is running. Never changes the layout or disables controls.
+    polling: bool,
+    seq: u64,
+    applied: u64,
+    error_from_poll: bool,
     phrase: String,
     error: String,
     logs: String,
@@ -236,6 +264,10 @@ impl Mobile {
             tx,
             rx,
             busy: false,
+            polling: false,
+            seq: 0,
+            applied: 0,
+            error_from_poll: false,
             phrase: String::new(),
             error: String::new(),
             logs: String::new(),
@@ -281,16 +313,16 @@ impl Mobile {
             })();
             let _ = tx.send(match result {
                 Ok(node) => Message::Node(node),
-                Err(e) => Message::Error(format!("{e:#}")),
+                Err(e) => Message::Error(format!("{e:#}"), transient(&e), false),
             });
         });
     }
     fn network_status(&mut self) {
-        if self.busy {
+        if self.busy || self.polling {
             return;
         }
         if let Some(node) = self.node.clone() {
-            self.busy = true;
+            self.polling = true;
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let result = java_string("networkSnapshot", None)
@@ -298,7 +330,7 @@ impl Mobile {
                     .and_then(|_| node.status());
                 let _ = tx.send(match result {
                     Ok(s) => Message::Network(s),
-                    Err(e) => Message::Error(e.to_string()),
+                    Err(e) => Message::Error(e.to_string(), transient(&e), true),
                 });
             });
         }
@@ -334,30 +366,46 @@ impl Mobile {
                 .and_then(|v| Ok(serde_json::from_value(v)?));
             let _ = tx.send(match result {
                 Ok(session) => Message::Paired(session),
-                Err(e) => Message::Error(e.to_string()),
+                Err(e) => Message::Error(e.to_string(), transient(&e), false),
             });
         });
     }
+    /// User-started command: always allowed, even while a silent refresh is in flight.
     fn command(&mut self, op: &str, payload: Value) {
-        if self.busy {
+        self.dispatch(op, payload, false);
+    }
+    /// Silent refresh: skipped while anything else is running.
+    fn poll(&mut self) {
+        self.dispatch("status", json!({}), true);
+    }
+    fn dispatch(&mut self, op: &str, payload: Value, background: bool) {
+        if self.busy || (background && self.polling) {
             return;
         }
         let Some(session) = self.session.clone() else {
             return;
         };
+        self.seq += 1;
+        let seq = self.seq;
         let r = session.request(op, payload);
         let node = self.node.clone();
         let tx = self.tx.clone();
         let demo = self.demo;
         let op = op.to_string();
-        self.busy = true;
+        if background {
+            self.polling = true;
+        } else {
+            self.busy = true;
+            self.error.clear();
+            self.error_from_poll = false;
+        }
         std::thread::spawn(move || {
             let result =
                 prepare_network(&node, demo, &tx).and_then(|_| call(node, &session, &r, demo));
             let _ = tx.send(match result {
                 Ok(v) if op == "logs" => Message::Logs(v),
-                Ok(v) => Message::Status(v),
-                Err(e) => Message::Error(e.to_string()),
+                Ok(v) => Message::Status(v, seq, background),
+                Err(e) => Message::Error(e.to_string(), transient(&e), background),
             });
         });
     }
@@ -371,30 +419,35 @@ impl Mobile {
                 self.network = v;
                 continue;
             }
-            self.busy = false;
             self.last_poll = Instant::now();
             match message {
                 Message::Node(node) => {
+                    self.busy = false;
                     #[cfg(debug_assertions)]
                     {
-                        *TEST_NODE.get_or_init(Default::default).lock().unwrap() =
-                            Some(node.clone());
+                        *TEST_NODE
+                            .get_or_init(Default::default)
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(node.clone());
                     }
                     self.node = Some(node);
                     self.error.clear();
                     self.last_poll = Instant::now() - Duration::from_secs(5);
                 }
                 Message::Network(v) => {
+                    self.polling = false;
                     #[cfg(debug_assertions)]
                     {
                         *NETWORK_TEST_STATE
                             .get_or_init(Default::default)
                             .lock()
-                            .unwrap() = v["BackendState"].as_str().unwrap_or("").into();
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            v["BackendState"].as_str().unwrap_or("").into();
                     }
                     self.network = v;
                 }
                 Message::Paired(session) => {
+                    self.busy = false;
                     match serde_json::to_string(&session)
                         .ok()
                         .and_then(|s| java_string("storeSession", Some(&s)).ok())
@@ -408,35 +461,53 @@ impl Mobile {
                         None => self.error = "Cannot securely store this device pairing".into(),
                     }
                 }
-                Message::Status(v) => {
-                    self.state = v;
-                    self.last_ok = Some(Instant::now());
-                    self.error.clear();
+                Message::Status(v, seq, background) => {
+                    if background {
+                        self.polling = false;
+                    } else {
+                        self.busy = false;
+                    }
+                    // A refresh that was started before a later command must not overwrite
+                    // that command's newer result.
+                    if seq >= self.applied {
+                        self.applied = seq;
+                        self.state = v;
+                        self.last_ok = Some(Instant::now());
+                        if !background || self.error_from_poll {
+                            self.error.clear();
+                            self.error_from_poll = false;
+                        }
+                    }
                 }
                 Message::Logs(v) => {
+                    self.busy = false;
                     self.logs = serde_json::to_string_pretty(&v).unwrap_or_default();
                     self.last_ok = Some(Instant::now());
                 }
-                Message::Error(e) => {
+                Message::Error(e, is_transient, background) => {
+                    if background {
+                        self.polling = false;
+                    } else {
+                        self.busy = false;
+                    }
                     #[cfg(debug_assertions)]
                     {
                         *NETWORK_TEST_STATE
                             .get_or_init(Default::default)
                             .lock()
-                            .unwrap() = format!("error: {e}");
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = format!("error: {e}");
                     }
-                    self.error = if e.contains("deadline")
-                        || e.contains("timed out")
-                        || e.contains("temporarily unavailable")
-                        || e.contains("(os error 11)")
-                        || e.contains("EOF while parsing")
-                        || e.contains("Broken pipe")
-                        || e.contains("reset by peer")
-                    {
+                    if background && is_transient {
+                        // A passing hiccup during a silent refresh: keep the last known status.
+                        // "Connection lost" appears by itself if it lasts.
+                        continue;
+                    }
+                    self.error = if is_transient {
                         "Laptop connection timed out or was interrupted. Refresh status to retry. No action was automatically repeated.".into()
                     } else {
                         e
                     };
+                    self.error_from_poll = background;
                 }
                 Message::NetworkInfo(_) => unreachable!(),
             }
@@ -499,7 +570,7 @@ impl eframe::App for Mobile {
         let inputs = INPUT
             .get_or_init(Default::default)
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain(..)
             .collect::<Vec<_>>();
         for code in inputs {
@@ -524,10 +595,15 @@ impl eframe::App for Mobile {
                 self.phrase = code;
             }
         }
-        if !self.busy && self.last_poll.elapsed() > Duration::from_secs(3) {
+        // Silent refresh: never while an action is running or a confirmation is open.
+        if !self.busy
+            && !self.polling
+            && self.confirm.is_none()
+            && self.last_poll.elapsed() > Duration::from_secs(5)
+        {
             self.last_poll = Instant::now();
             if self.session.is_some() {
-                self.command("status", json!({}));
+                self.poll();
             } else {
                 self.network_status();
             }
@@ -556,9 +632,9 @@ impl eframe::App for Mobile {
                 if ui.button("Enter Pairing Phrase").clicked(){if let Err(e)=java_string("enterPhrase",None){self.error=e.to_string();}}
                 ui.label("Or enter the 24-word pairing phrase:");ui.add(egui::TextEdit::multiline(&mut self.phrase).hint_text("Paste pairing phrase or scanned QR link").desired_rows(5).desired_width(f32::INFINITY));
                 if ui.add_enabled(!self.busy,egui::Button::new("Pair Laptop").min_size(Vec2::new(ui.available_width(),46.))).clicked(){self.pair();}
-                ui.label("Pairing codes stay valid until regenerated on the laptop. The laptop controls access for each phone.");
+                ui.label("A pairing code lasts 15 minutes and works once. After pairing, approve this phone on the laptop and check that the Device ID matches.");
             }else{
-                let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("Waiting for laptop status").to_string();ui.heading(&status);ui.label(if online{"Laptop online"}else if self.last_ok.is_some(){"Connection lost · showing last confirmed status"}else{"Laptop status has not been received yet"});
+                let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("Waiting for laptop status").to_string();ui.heading(&status);if let Some(s)=&self.session{ui.small(format!("Device ID: {}",device_id(s)));}ui.label(if online{"Laptop online"}else if self.last_ok.is_some(){"Connection lost · showing last confirmed status"}else{"Laptop status has not been received yet"});
                 if let Some(next)=self.state["next_sleep"].as_u64(){let seconds=next.saturating_sub(now());ui.label(format!("Will sleep in: {} h {} min {} s",seconds/3600,seconds/60%60,seconds%60));}
                 if let Some(message)=self.state["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
                 if ui.add_enabled(!self.busy,egui::Button::new("Refresh status")).clicked(){self.command("status",json!({}));}
@@ -607,7 +683,7 @@ impl eframe::App for Mobile {
             *CONNECTION_TEST_STATE
                 .get_or_init(Default::default)
                 .lock()
-                .unwrap() =
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 json!({"busy":self.busy,"status":self.state["status"],"error":self.error})
                     .to_string();
         }
@@ -619,7 +695,7 @@ pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Warn),
     );
-    *ACTIVITY.get_or_init(Default::default).lock().unwrap() = Some(app.clone());
+    *ACTIVITY.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app.clone());
     let options = eframe::NativeOptions {
         android_app: Some(app),
         renderer: eframe::Renderer::Glow,

@@ -19,6 +19,9 @@
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QTextEdit>
+#include <QEventLoop>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -357,7 +360,13 @@ Window::Window(Client &client, QString file)
     setWindowTitle("RTC Sleeper");
     setWindowIcon(QIcon::fromTheme("sleep-scheduler"));
     setObjectName("mainWindow");
-    setFixedSize(1000, 720);
+    {
+        // Small laptop screens (768p) cannot show a fixed 720 px window plus panels.
+        auto *screen = QGuiApplication::primaryScreen();
+        int available = screen ? screen->availableGeometry().height() - 60 : 720;
+        setMinimumSize(1000, 660);
+        resize(1000, qBound(660, available, 720));
+    }
     setStyleSheet(appStyle);
     arabic_ = settings_.value("language", "en").toString() == "ar";
     last_ = QJsonDocument::fromJson(settings_.value("lastConfig").toByteArray()).object();
@@ -374,7 +383,7 @@ Window::Window(Client &client, QString file)
     }
     build();
     auto *timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &Window::refresh);
+    connect(timer, &QTimer::timeout, this, &Window::autoRefresh);
     timer->start(1000);
 }
 void Window::build() {
@@ -655,32 +664,89 @@ void Window::updateDashboard() {
                              timeLabel(state_["next_sleep"])
                        : state_["message"].toString());
 }
+void Window::applyStatus(QJsonObject fresh) {
+    auto old = state_["status"].toString();
+    state_ = fresh;
+    if (state_["config"].isObject()) {
+        if (!editing_)
+            remember(state_["config"].toObject());
+        if (!editing_ && pages_->currentWidget() == form_)
+            switchPage(dashboard_);
+    } else if (old != "idle") {
+        editing_ = false;
+        setConfig(last_);
+        cancelEdit_->hide();
+        switchPage(form_);
+    }
+    updateDashboard();
+    if (pages_->currentWidget() == form_)
+        updateForm();
+}
+// Synchronous refresh (used by tests and explicit calls).
 void Window::refresh() {
     try {
-        auto fresh = client_.status();
-        auto old = state_["status"].toString();
-        state_ = fresh;
-        if (state_["config"].isObject()) {
-            if (!editing_)
-                remember(state_["config"].toObject());
-            if (!editing_ && pages_->currentWidget() == form_)
-                switchPage(dashboard_);
-        } else if (old != "idle") {
-            editing_ = false;
-            setConfig(last_);
-            cancelEdit_->hide();
-            switchPage(form_);
-        }
-        updateDashboard();
-        if (pages_->currentWidget() == form_)
-            updateForm();
+        applyStatus(client_.status());
     } catch (const std::exception &e) {
         next_->setText(e.what());
     }
 }
+// Timer slot: never blocks the UI. The status query runs on a worker thread and the countdown
+// keeps ticking from the last known state in between.
+void Window::autoRefresh() {
+    if (busy_)
+        return;
+    using namespace std::chrono_literals;
+    if (pending_.valid()) {
+        if (pending_.wait_for(0ms) == std::future_status::ready) {
+            bool drop = dropPending_;
+            dropPending_ = false;
+            try {
+                auto fresh = pending_.get();
+                if (!drop)
+                    applyStatus(fresh);
+            } catch (const std::exception &e) {
+                if (!drop)
+                    next_->setText(e.what());
+            }
+        } else {
+            updateDashboard();
+        }
+        return;
+    }
+    updateDashboard();
+    auto now = QDateTime::currentSecsSinceEpoch();
+    if (now - lastStatus_ >= 3) {
+        lastStatus_ = now;
+        pending_ = std::async(std::launch::async, [this] { return client_.status(); });
+    }
+}
+// Runs a slow privileged call off the GUI thread while keeping the event loop (and repaint)
+// alive. The window is disabled meanwhile so the user cannot start a second action.
+QJsonObject Window::runBlocking(std::function<QJsonObject()> fn) {
+    using namespace std::chrono_literals;
+    busy_ = true;
+    setEnabled(false);
+    setCursor(Qt::WaitCursor);
+    auto future = std::async(std::launch::async, std::move(fn));
+    QEventLoop loop;
+    QTimer poll;
+    poll.setInterval(25);
+    connect(&poll, &QTimer::timeout, &loop, [&] {
+        if (future.wait_for(0ms) == std::future_status::ready)
+            loop.quit();
+    });
+    poll.start();
+    loop.exec();
+    unsetCursor();
+    setEnabled(true);
+    busy_ = false;
+    if (pending_.valid())
+        dropPending_ = true; // an in-flight status read predates this change
+    return future.get();
+}
 bool Window::operation(QString op, QJsonObject p) {
     try {
-        state_ = client_.request(op, p, userActor("gui"));
+        state_ = runBlocking([&] { return client_.request(op, p, userActor("gui")); });
         updateDashboard();
         return true;
     } catch (const std::exception &e) {
@@ -699,7 +765,7 @@ void Window::schedule() {
     }
     bool replace = false;
     try {
-        auto live = client_.status();
+        auto live = runBlocking([&] { return client_.status(); });
         if (!live["actual_alarm"].isNull() && live["actual_alarm"] != live["expected_alarm"]) {
             if (QMessageBox::question(
                     this, text("Replace external RTC alarm?", "استبدال منبّه RTC خارجي؟"),
@@ -814,14 +880,17 @@ void Window::remoteDialog() {
     auto *permissions = new QHBoxLayout;
     auto *allow = button(text("Allow selected", "السماح للجهاز المحدد"));
     auto *block = button(text("Block selected", "منع الجهاز المحدد"));
+    auto *remove = button(text("Remove selected", "حذف الجهاز المحدد"));
     auto *regenerate = button(text("Regenerate pairing code", "تغيير كود الاقتران"));
     permissions->addWidget(allow);
     permissions->addWidget(block);
+    permissions->addWidget(remove);
     permissions->addWidget(regenerate);
     l->addLayout(permissions);
     auto *revoke = button(text("Revoke all paired phones", "إلغاء صلاحية كل الهواتف"));
     l->addWidget(revoke);
     QString loginUrl;
+    bool inRequest = false;
     auto request = [&](const QString &op, const QString &id = QString()) {
         auto executable = QStandardPaths::findExecutable("rtc-sleeper-remote");
         if (executable.isEmpty())
@@ -829,13 +898,31 @@ void Window::remoteDialog() {
         QProcess p;
         QStringList arguments{op};
         if (!id.isEmpty()) arguments << id;
+        // Asynchronous with a local event loop: the dialog stays painted and responsive.
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&p, &QProcess::finished, &loop, &QEventLoop::quit);
+        QObject::connect(&p, &QProcess::errorOccurred, &loop, &QEventLoop::quit);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        inRequest = true;
+        d.setEnabled(false);
         p.start(executable, arguments);
-        if (!p.waitForStarted(1500) || !p.waitForFinished(9000)) {
+        if (p.state() != QProcess::NotRunning) {
+            timeout.start(9000);
+            loop.exec();
+        }
+        d.setEnabled(true);
+        inRequest = false;
+        if (p.state() != QProcess::NotRunning) {
             p.kill();
             p.waitForFinished();
             throw std::runtime_error(
-                "Install/start the remote service: bash scripts/install-remote.sh");
+                "The remote service did not answer in time. It may be busy; try again.");
         }
+        if (p.error() == QProcess::FailedToStart)
+            throw std::runtime_error(
+                "Install/start the remote service: bash scripts/install-remote.sh");
         auto bytes = p.readAllStandardOutput();
         if (p.exitCode() != 0)
             throw std::runtime_error(p.readAllStandardError().toStdString());
@@ -850,8 +937,10 @@ void Window::remoteDialog() {
             loginUrl = s["AuthURL"].toString();
             bool ready = s["BackendState"] == "Running";
             status->setText(
-                ready ? text("Private network connected. Ready to pair.",
-                             "الشبكة الخاصة متصلة. جاهز للاقتران.")
+                ready ? text("Private network connected. A pairing code lasts 15 minutes and pairs one phone. "
+                             "Compare the device ID with the one shown on the phone before choosing Allow.",
+                             "الشبكة الخاصة متصلة. كود الاقتران صالح 15 دقيقة ويقترن به هاتف واحد. "
+                             "قارن رقم الجهاز بالظاهر على الهاتف قبل الضغط على السماح.")
                       : text("Sign in with the same Tailscale account used in the Android app.",
                              "سجّل الدخول بنفس حساب Tailscale المستخدم في تطبيق أندرويد."));
             generate->setEnabled(ready);
@@ -885,6 +974,7 @@ void Window::remoteDialog() {
     };
     connect(allow, &QPushButton::clicked, &d, [&] {changeAccess("allow");});
     connect(block, &QPushButton::clicked, &d, [&] {changeAccess("block");});
+    connect(remove, &QPushButton::clicked, &d, [&] {changeAccess("remove");});
     connect(signIn, &QPushButton::clicked, &d, [&] {
         try {
             request("login");
@@ -928,7 +1018,10 @@ void Window::remoteDialog() {
     update();
     if (generate->isEnabled()) showPairing("pair");
     QTimer refreshDevices;
-    connect(&refreshDevices, &QTimer::timeout, &d, update);
+    connect(&refreshDevices, &QTimer::timeout, &d, [&] {
+        if (!inRequest)
+            update();
+    });
     refreshDevices.start(5000);
     d.exec();
 }

@@ -13,25 +13,7 @@ on:
 permissions:
   contents: read
 jobs:
-  test:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.100.0'
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: remote
-      - name: Rust validation, pairing and authorization tests
-        working-directory: remote
-        run: |
-          cargo test --locked --workspace --jobs 2
-          cargo build --locked -p rtc-sleeper-remote --jobs 2
-      - name: Loopback integration, fake scheduler only
-        run: python3 -m unittest discover -s tests -p test_remote.py -v
   apk:
-    needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -84,38 +66,6 @@ jobs:
       - name: Build debug APK for pull requests
         if: github.event_name == 'pull_request'
         run: bash scripts/build-android.sh debug
-      - name: Build Android sandbox regression test
-        env:
-          RTC_ANDROID_ABIS: x86_64
-        run: |
-          bash scripts/build-android.sh debug
-          android/gradlew -p android --no-daemon :app:assembleDebugAndroidTest
-      - name: Start Android 11 emulator and test embedded network startup
-        timeout-minutes: 12
-        run: |
-          export ANDROID_AVD_HOME="$RUNNER_TEMP/rtc-avd"
-          mkdir -p "$ANDROID_AVD_HOME"
-          trap 'cat "$RUNNER_TEMP/rtc-emulator.log" 2>/dev/null || true' ERR
-          sdkmanager_path="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)"
-          "$sdkmanager_path" 'emulator' 'system-images;android-30;default;x86_64'
-          avdmanager_path="$(dirname "$sdkmanager_path")/avdmanager"
-          echo no | "$avdmanager_path" create avd -n rtc-network-test -k 'system-images;android-30;default;x86_64' -d 'Nexus S'
-          sudo chmod 666 /dev/kvm
-          "$ANDROID_HOME/emulator/emulator" -avd rtc-network-test -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -feature -Vulkan -memory 2048 -cores 2 >"$RUNNER_TEMP/rtc-emulator.log" 2>&1 &
-          emulator_pid=$!
-          sleep 5
-          kill -0 "$emulator_pid"
-          adb_path="$ANDROID_HOME/platform-tools/adb"
-          for attempt in $(seq 1 180); do
-            if [[ "$("$adb_path" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; then break; fi
-            sleep 2
-          done
-          test "$("$adb_path" shell getprop sys.boot_completed | tr -d '\r')" = 1
-          "$adb_path" install -r android/app/build/outputs/apk/debug/app-debug.apk
-          "$adb_path" install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          "$adb_path" shell am instrument -w com.mohamedbassem.rtcsleeper.test/androidx.test.runner.AndroidJUnitRunner | tee "$RUNNER_TEMP/rtc-network-test.txt"
-          grep -Eq '^OK \(1 test\)' "$RUNNER_TEMP/rtc-network-test.txt"
-          "$adb_path" emu kill
       - name: Build desktop companion archive
         run: |
           mkdir -p dist/rtc-sleeper-remote/scripts

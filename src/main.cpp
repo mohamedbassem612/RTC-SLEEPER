@@ -1,5 +1,9 @@
+#ifdef RTC_HEADLESS
+#include "client.h"
+#else
 #include "window.h"
 #include <QApplication>
+#endif
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -14,6 +18,11 @@ static void output(QJsonObject obj) {
     QTextStream(stdout) << QJsonDocument(obj).toJson(QJsonDocument::Indented);
 }
 int main(int argc, char **argv) {
+#ifdef RTC_HEADLESS
+    // Root-side build: QtCore only, no widgets, no platform plugins loaded as root.
+    const bool gui = false;
+    auto app = std::make_unique<QCoreApplication>(argc, argv);
+#else
     bool gui = argc == 1;
     if (QFileInfo(QString::fromLocal8Bit(argv[0])).fileName() == "sleep-scheduler-control")
         gui = false;
@@ -22,16 +31,19 @@ int main(int argc, char **argv) {
         app = std::make_unique<QApplication>(argc, argv);
     else
         app = std::make_unique<QCoreApplication>(argc, argv);
+#endif
     QCoreApplication::setApplicationName("RTC Sleeper");
     QCoreApplication::setOrganizationName("RTCSleeper");
     QCoreApplication::setApplicationVersion("2.0.0");
     try {
+#ifndef RTC_HEADLESS
         if (gui) {
             Client client;
             Window w(client);
             w.show();
             return app->exec();
         }
+#endif
         auto args = app->arguments();
         Host host;
         Engine engine("/var/lib/sleep-scheduler", host);

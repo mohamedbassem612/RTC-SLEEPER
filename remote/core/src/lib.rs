@@ -14,6 +14,10 @@ use std::{
 use subtle::ConstantTimeEq;
 
 pub const PORT: u16 = 48187;
+/// A pairing code is valid for this many seconds and works once.
+pub const PAIR_TTL: u64 = 900;
+pub const MAX_DEVICES: usize = 16;
+pub const MAX_PENDING: usize = 4;
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -46,7 +50,7 @@ impl PairTicket {
             ip,
             port,
             secret: random_hex(16),
-            expires: u64::MAX,
+            expires: now() + PAIR_TTL,
         }
     }
     fn bytes(&self) -> Result<Vec<u8>> {
@@ -148,6 +152,8 @@ impl Session {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Store {
     pub sessions: Vec<Session>,
+    /// Replay window. Memory only: never written to disk.
+    #[serde(skip)]
     pub seen: Vec<(String, u64)>,
     #[serde(default)]
     pub pairing: Option<PairTicket>,
@@ -165,38 +171,87 @@ pub trait Backend: Send {
 pub struct Server<B: Backend> {
     pub store: Store,
     pub backend: B,
+    /// Accept loopback / emulator pairing tickets (mock mode only).
+    pub allow_demo: bool,
+}
+pub enum Authorized {
+    /// Fully handled while the caller holds the server lock (pairing).
+    Done(Value),
+    /// Authorized command. Run it WITHOUT holding the server lock.
+    Run {
+        op: String,
+        payload: Value,
+        device: String,
+    },
 }
 impl<B: Backend> Server<B> {
     pub fn handle(&mut self, r: &Value) -> Result<Value> {
+        match self.authorize(r)? {
+            Authorized::Done(v) => Ok(v),
+            Authorized::Run {
+                op,
+                payload,
+                device,
+            } => self.backend.execute(&op, &payload, &device),
+        }
+    }
+    pub fn authorize(&mut self, r: &Value) -> Result<Authorized> {
         ensure!(
             !self.store.remote_disabled,
             "Remote access is disabled on the laptop"
         );
         let op = r["op"].as_str().context("Missing operation")?;
         if op == "pair" {
-            let supplied =
-                PairTicket::parse(r["code"].as_str().context("Missing pairing code")?, true)?;
+            let supplied = PairTicket::parse(
+                r["code"].as_str().context("Missing pairing code")?,
+                self.allow_demo,
+            )?;
             let ticket = self
                 .store
                 .pairing
-                .as_ref()
-                .context("No active pairing code")?;
+                .clone()
+                .context("No active pairing code; generate a new one on the laptop")?;
+            let t = now();
             ensure!(
-                ticket.expires > now()
+                ticket.expires > t
+                    && ticket.expires <= t + PAIR_TTL + 60
                     && supplied.ip == ticket.ip
                     && supplied.port == ticket.port
                     && supplied.expires == ticket.expires
                     && same(&supplied.secret, &ticket.secret),
-                "Pairing code rejected"
+                "Pairing code rejected or expired; generate a new one"
             );
             let device = r["device"].as_str().context("Missing device name")?;
             ensure!(
                 !device.is_empty() && device.len() <= 80 && !device.chars().any(char::is_control),
                 "Invalid device name"
             );
+            // A phone that pairs again replaces its own earlier unapproved entry.
+            // Approved devices are never evicted by a new pairing.
+            let waiting = self.store.blocked.clone();
+            self.store
+                .sessions
+                .retain(|s| !(s.device == device && waiting.contains(&device_id(s))));
+            let live = self
+                .store
+                .sessions
+                .iter()
+                .map(device_id)
+                .collect::<HashSet<_>>();
+            self.store.blocked.retain(|id| live.contains(id));
+            let pending = self
+                .store
+                .sessions
+                .iter()
+                .filter(|s| self.store.blocked.contains(&device_id(s)))
+                .count();
             ensure!(
-                self.store.sessions.len() < 16,
-                "Device limit reached; revoke unused devices"
+                pending < MAX_PENDING,
+                "Too many devices are waiting for approval; remove them on the laptop"
+            );
+            ensure!(
+                self.store.sessions.len() < MAX_DEVICES,
+                "Device limit reached; remove unused devices on the laptop"
             );
             let session = Session {
                 token: random_hex(32),
@@ -206,7 +261,9 @@ impl<B: Backend> Server<B> {
             };
             self.store.blocked.push(device_id(&session));
             self.store.sessions.push(session.clone());
-            return Ok(serde_json::to_value(session)?);
+            // Single use: the code is burned as soon as it pairs a phone.
+            self.store.pairing = None;
+            return Ok(Authorized::Done(serde_json::to_value(session)?));
         }
         let token = r["token"].as_str().context("Not paired")?;
         let session = self
@@ -237,7 +294,11 @@ impl<B: Backend> Server<B> {
         );
         validate_operation(op, &r["payload"])?;
         self.store.seen.push((id.into(), at));
-        self.backend.execute(op, &r["payload"], &session.device)
+        Ok(Authorized::Run {
+            op: op.into(),
+            payload: r["payload"].clone(),
+            device: session.device,
+        })
     }
 }
 pub fn validate_operation(op: &str, p: &Value) -> Result<()> {
@@ -247,14 +308,12 @@ pub fn validate_operation(op: &str, p: &Value) -> Result<()> {
             ensure!(p.as_object().unwrap().is_empty(), "Unexpected fields")
         }
         "logs" => {
-            ensure!(
-                p.as_object().unwrap().keys().all(|k| k == "limit"),
-                "Unexpected log fields"
-            );
-            ensure!(
-                (1..=2000).contains(&p["limit"].as_u64().unwrap_or(50)),
-                "Invalid log limit"
-            );
+            let o = p.as_object().unwrap();
+            ensure!(o.keys().all(|k| k == "limit"), "Unexpected log fields");
+            if let Some(v) = o.get("limit") {
+                let n = v.as_u64().context("Invalid log limit")?;
+                ensure!((1..=2000).contains(&n), "Invalid log limit");
+            }
         }
         "resume" => ensure!(
             p.as_object().unwrap().is_empty(),
@@ -341,6 +400,7 @@ mod tests {
                 ..Store::default()
             },
             backend: Fake { writes: 0 },
+            allow_demo: false,
         }
     }
     #[test]
@@ -378,16 +438,15 @@ mod tests {
         assert!(PairTicket::parse(&t.uri().unwrap(), true).is_err());
     }
     #[test]
-    fn reusable_pairing_access_control_and_replay() {
+    fn single_use_pairing_access_control_and_replay() {
         let mut s = server();
         let code = s.store.pairing.as_ref().unwrap().phrase().unwrap();
         let req = json!({"op":"pair","code":code,"device":"Android test"});
         let session: Session = serde_json::from_value(s.handle(&req).unwrap()).unwrap();
-        assert!(s.handle(&req).is_ok());
+        assert!(s.handle(&req).is_err(), "code must be single use");
         assert!(s.handle(&session.request("status", json!({}))).is_err());
         s.store.blocked.clear();
         s.store.remote_disabled = true;
-        assert!(s.handle(&req).is_err());
         assert!(s.handle(&session.request("status", json!({}))).is_err());
         s.store.remote_disabled = false;
         let req = session.request("status", json!({}));
@@ -401,6 +460,59 @@ mod tests {
         bad["token"] = json!("bad");
         assert!(s.handle(&bad).is_err());
     }
+    fn pair_request(s: &Server<Fake>, name: &str) -> Value {
+        let code = s.store.pairing.as_ref().unwrap().phrase().unwrap();
+        json!({"op":"pair","code":code,"device":name})
+    }
+    #[test]
+    fn expired_and_legacy_codes_rejected() {
+        let mut s = server();
+        let mut t = s.store.pairing.clone().unwrap();
+        t.expires = now() - 1;
+        s.store.pairing = Some(t.clone());
+        assert!(s.handle(&pair_request(&s, "Phone")).is_err());
+        t.expires = u64::MAX; // legacy never-expiring ticket from an old store
+        s.store.pairing = Some(t);
+        assert!(s.handle(&pair_request(&s, "Phone")).is_err());
+        assert!(s.store.sessions.is_empty());
+    }
+    #[test]
+    fn pending_devices_capped_and_deduplicated() {
+        let mut s = server();
+        let mut first = None;
+        for i in 0..MAX_PENDING {
+            s.store.pairing = Some(PairTicket::new("100.80.1.2".parse().unwrap(), PORT));
+            let v = s.handle(&pair_request(&s, &format!("Phone {i}"))).unwrap();
+            first.get_or_insert(v);
+        }
+        s.store.pairing = Some(PairTicket::new("100.80.1.2".parse().unwrap(), PORT));
+        assert!(s.handle(&pair_request(&s, "One too many")).is_err());
+        // Same name pairing again replaces its own unapproved entry.
+        assert!(s.handle(&pair_request(&s, "Phone 0")).is_ok());
+        assert_eq!(s.store.sessions.len(), MAX_PENDING);
+        assert_eq!(s.store.blocked.len(), MAX_PENDING);
+    }
+    #[test]
+    fn approved_device_not_evicted_by_same_name() {
+        let mut s = server();
+        let v = s.handle(&pair_request(&s, "Pixel")).unwrap();
+        let session: Session = serde_json::from_value(v).unwrap();
+        s.store.blocked.clear();
+        s.store.pairing = Some(PairTicket::new("100.80.1.2".parse().unwrap(), PORT));
+        s.handle(&pair_request(&s, "Pixel")).unwrap();
+        assert!(s.store.sessions.iter().any(|x| x.token == session.token));
+        assert_eq!(s.store.sessions.len(), 2);
+    }
+    #[test]
+    fn authorize_never_runs_backend() {
+        let mut s = server();
+        let v = s.handle(&pair_request(&s, "Pixel")).unwrap();
+        let session: Session = serde_json::from_value(v).unwrap();
+        s.store.blocked.clear();
+        let a = s.authorize(&session.request("status", json!({}))).unwrap();
+        assert!(matches!(a, Authorized::Run { .. }));
+        assert_eq!(s.backend.writes, 0);
+    }
     #[test]
     fn validate_inputs_and_whitelist() {
         for p in [
@@ -411,5 +523,8 @@ mod tests {
         }
         assert!(validate_operation("shutdown", &json!({})).is_err());
         assert!(validate_operation("resume", &json!({"replace_alarm":true})).is_err());
+        assert!(validate_operation("logs", &json!({"limit":"5"})).is_err());
+        assert!(validate_operation("logs", &json!({"limit":0})).is_err());
+        assert!(validate_operation("logs", &json!({})).is_ok());
     }
 }

@@ -45,11 +45,11 @@ class RemoteIntegration(unittest.TestCase):
                 paired = exchange(socket.AF_INET,address,pair)
                 self.assertTrue(paired['ok'])
                 token = paired['result']['token']
-                self.assertTrue(exchange(socket.AF_INET,address,pair)['ok'])
-                self.assertEqual(local('pair')['phrase'],ticket['phrase'])
+                self.assertFalse(exchange(socket.AF_INET,address,pair)['ok'])  # single use
+                self.assertNotEqual(local('pair')['phrase'],ticket['phrase'])  # burned, so a new one
                 devices=local('devices')
                 self.assertTrue(devices['enabled'])
-                self.assertEqual(len(devices['devices']),2)
+                self.assertEqual(len(devices['devices']),1)
                 self.assertNotIn('token',json.dumps(devices))
                 def request(op,payload):
                     return {'op':op,'payload':payload,'token':token,'id':uuid.uuid4().hex,'at':int(time.time())}
@@ -106,6 +106,9 @@ class RemoteIntegration(unittest.TestCase):
                 self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
                 local('allow',id=first)
                 self.assertEqual(call('status',{})['status'],'idle')
+                local('remove',id=first)
+                self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
+                self.assertEqual(local('devices')['devices'],[])
                 local('revoke')
                 self.assertFalse(exchange(socket.AF_INET,address,request('status',{}))['ok'])
                 self.assertEqual((control.stat().st_mode & 0o777),0o600)

@@ -1,4 +1,4 @@
 #!/bin/sh
 if [ "$1" = post ]; then
-    /usr/lib/rtc-sleeper/sleep-scheduler --resumed
+    /usr/lib/rtc-sleeper/sleep-scheduler-engine --resumed
 fi

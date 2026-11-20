@@ -10,9 +10,14 @@ id "$target_user" >/dev/null
 for tool in /usr/bin/systemctl /usr/sbin/rtcwake /usr/bin/sudo /usr/sbin/visudo; do [[ -x "$tool" ]] || { echo "Missing: $tool" >&2; exit 1; }; done
 systemctl stop sleep-scheduler.service 2>/dev/null || true
 install -d -m 755 /usr/lib/rtc-sleeper /usr/local/libexec /var/lib/sleep-scheduler
+# The root-side parts (daemon, resume hook, sudo helper) use the small QtCore-only engine
+# build when it sits next to the GUI binary, so no GUI/plugin code ever runs as root.
+engine="$(dirname -- "$binary")/sleep-scheduler-engine"
+[[ -f "$engine" ]] || { echo 'Warning: sleep-scheduler-engine not found; using the full binary as root helper.' >&2; engine="$binary"; }
 install -m 755 "$binary" /usr/lib/rtc-sleeper/sleep-scheduler
+install -m 755 "$engine" /usr/lib/rtc-sleeper/sleep-scheduler-engine
 ln -sfn /usr/lib/rtc-sleeper/sleep-scheduler /usr/local/bin/sleep-scheduler
-install -m 755 "$binary" /usr/local/libexec/sleep-scheduler-control
+install -m 755 "$engine" /usr/local/libexec/sleep-scheduler-control
 install -m 644 "$source_dir/packaging/sleep-scheduler.service" /etc/systemd/system/sleep-scheduler.service
 install -m 755 "$source_dir/packaging/sleep-scheduler-hook" /usr/lib/systemd/system-sleep/sleep-scheduler
 install -m 644 "$source_dir/packaging/sleep-scheduler.desktop" /usr/share/applications/sleep-scheduler.desktop
