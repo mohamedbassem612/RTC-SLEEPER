@@ -19,7 +19,9 @@
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QTextEdit>
+#include <QClipboard>
 #include <QEventLoop>
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QTimer>
@@ -845,8 +847,8 @@ void Window::remoteDialog() {
     auto *status = label("", "muted");
     status->setWordWrap(true);
     l->addWidget(status);
-    auto *signIn = button(text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
-    l->addWidget(signIn);
+    auto *account = button(text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
+    l->addWidget(account);
     auto *generate = button(text("Show QR / pairing phrase", "عرض QR / عبارة الاقتران"), "primary");
     l->addWidget(generate);
     auto *qr = new QLabel;
@@ -854,11 +856,19 @@ void Window::remoteDialog() {
     l->addWidget(qr);
     auto *phrase = new QTextEdit;
     phrase->setReadOnly(true);
-    phrase->setMaximumHeight(100);
+    phrase->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    phrase->setMinimumHeight(140);
+    phrase->setMaximumHeight(170);
     l->addWidget(phrase);
+    auto *copy = button(text("Copy phrase", "نسخ العبارة"));
+    copy->setEnabled(false);
+    l->addWidget(copy);
+    auto *codeInfo = label("", "muted");
+    codeInfo->setWordWrap(true);
+    l->addWidget(codeInfo);
     auto *instructions =
-        label(text("Scan this QR or enter the phrase on another phone. It stays valid until regenerated. Each new phone needs Allow selected below before controlling this laptop.",
-                   "امسح QR أو أدخل العبارة على هاتف آخر. الكود ثابت لحد ما تغيّره. لازم تسمح لكل هاتف جديد من القائمة بالأسفل."),
+        label(text("Scan this QR or enter the phrase on the phone. The code is valid for 15 minutes and pairs one phone only. Each new phone needs Allow selected below before controlling this laptop.",
+                   "امسح QR أو أدخل العبارة على الهاتف. الكود صالح 15 دقيقة ويقترن بهاتف واحد فقط. لازم تسمح لكل هاتف جديد من القائمة بالأسفل."),
               "muted");
     instructions->setWordWrap(true);
     l->addWidget(instructions);
@@ -889,8 +899,9 @@ void Window::remoteDialog() {
     l->addLayout(permissions);
     auto *revoke = button(text("Revoke all paired phones", "إلغاء صلاحية كل الهواتف"));
     l->addWidget(revoke);
-    QString loginUrl;
-    bool inRequest = false;
+    QString loginUrl, currentPhrase;
+    qint64 codeExpires = 0;
+    bool signedIn = false, inRequest = false;
     auto request = [&](const QString &op, const QString &id = QString()) {
         auto executable = QStandardPaths::findExecutable("rtc-sleeper-remote");
         if (executable.isEmpty())
@@ -944,7 +955,11 @@ void Window::remoteDialog() {
                       : text("Sign in with the same Tailscale account used in the Android app.",
                              "سجّل الدخول بنفس حساب Tailscale المستخدم في تطبيق أندرويد."));
             generate->setEnabled(ready);
-            signIn->setEnabled(!ready);
+            regenerate->setEnabled(ready);
+            signedIn = ready;
+            account->setText(ready ? text("Sign out of private network", "تسجيل الخروج من الشبكة الخاصة")
+                                   : text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
+            account->setEnabled(true);
             auto access = request("devices");
             enabled->setChecked(access["enabled"].toBool());
             accessLabel->setText(access["enabled"].toBool() ? text("Remote access: ON", "التحكم عن بعد: مفعّل") : text("Remote access: OFF", "التحكم عن بعد: متوقف"));
@@ -975,8 +990,31 @@ void Window::remoteDialog() {
     connect(allow, &QPushButton::clicked, &d, [&] {changeAccess("allow");});
     connect(block, &QPushButton::clicked, &d, [&] {changeAccess("block");});
     connect(remove, &QPushButton::clicked, &d, [&] {changeAccess("remove");});
-    connect(signIn, &QPushButton::clicked, &d, [&] {
+    auto clearCode = [&] {
+        qr->clear();
+        phrase->clear();
+        currentPhrase.clear();
+        codeExpires = 0;
+        codeInfo->clear();
+        copy->setEnabled(false);
+    };
+    connect(account, &QPushButton::clicked, &d, [&] {
         try {
+            if (signedIn) {
+                if (QMessageBox::question(
+                        &d, text("Sign out?", "تسجيل الخروج؟"),
+                        text("This laptop will leave your Tailscale network and every paired phone will be "
+                             "cleared. You can sign in with a different account afterwards.",
+                             "سيخرج هذا الكمبيوتر من شبكة Tailscale وسيتم مسح كل الهواتف المقترنة. "
+                             "يمكنك تسجيل الدخول بحساب مختلف بعد ذلك.")) != QMessageBox::Yes)
+                    return;
+                request("logout");
+                clearCode();
+                update();
+                status->setText(text("Signed out. Press Sign in to use another account.",
+                                     "تم تسجيل الخروج. اضغط تسجيل الدخول لاستخدام حساب آخر."));
+                return;
+            }
             request("login");
             update();
             if (loginUrl.startsWith("https://login.tailscale.com/"))
@@ -994,11 +1032,44 @@ void Window::remoteDialog() {
             QPixmap image;
             image.loadFromData(QByteArray::fromBase64(ticket["qr_png"].toString().toUtf8()), "PNG");
             qr->setPixmap(image.scaled(220, 220, Qt::KeepAspectRatio, Qt::FastTransformation));
-            phrase->setPlainText(ticket["phrase"].toString());
+            currentPhrase = ticket["phrase"].toString();
+            QStringList lines, row;
+            int n = 0;
+            for (const auto &w : currentPhrase.split(' ', Qt::SkipEmptyParts)) {
+                row << QString("%1. %2").arg(++n, 2).arg(w, -9);
+                if (row.size() == 4) {
+                    lines << row.join("  ");
+                    row.clear();
+                }
+            }
+            if (!row.isEmpty())
+                lines << row.join("  ");
+            phrase->setPlainText(lines.join('\n'));
+            codeExpires = ticket["expires"].toInteger();
+            copy->setEnabled(true);
+            codeInfo->setText(
+                text("Created ", "أُنشئ ") + QDateTime::currentDateTime().toString("HH:mm:ss") +
+                text(" · expires ", " · ينتهي ") +
+                QDateTime::fromSecsSinceEpoch(codeExpires).toString("HH:mm:ss") +
+                (op == "regenerate" ? text(" · the previous code no longer works.", " · الكود السابق لم يعد يعمل.")
+                                    : QString()));
         } catch (const std::exception &e) {
             status->setText(e.what());
         }
     };
+    connect(copy, &QPushButton::clicked, &d, [&] {
+        if (currentPhrase.isEmpty())
+            return;
+        auto copied = currentPhrase;
+        QGuiApplication::clipboard()->setText(copied);
+        copy->setText(text("Copied (clears in 60 s)", "تم النسخ (يُمسح بعد 60 ثانية)"));
+        QTimer::singleShot(2500, &d, [&] { copy->setText(text("Copy phrase", "نسخ العبارة")); });
+        QTimer::singleShot(60000, qApp, [copied] {
+            auto *clipboard = QGuiApplication::clipboard();
+            if (clipboard->text() == copied)
+                clipboard->clear();
+        });
+    });
     connect(generate, &QPushButton::clicked, &d, [&] {showPairing("pair");});
     connect(regenerate, &QPushButton::clicked, &d, [&] {showPairing("regenerate");});
     connect(revoke, &QPushButton::clicked, &d, [&] {
@@ -1008,8 +1079,7 @@ void Window::remoteDialog() {
             return;
         try {
             request("revoke");
-            qr->clear();
-            phrase->clear();
+            clearCode();
             status->setText(text("Phone access revoked.", "تم إلغاء صلاحية الهواتف."));
         } catch (const std::exception &e) {
             status->setText(e.what());
@@ -1019,8 +1089,14 @@ void Window::remoteDialog() {
     if (generate->isEnabled()) showPairing("pair");
     QTimer refreshDevices;
     connect(&refreshDevices, &QTimer::timeout, &d, [&] {
-        if (!inRequest)
-            update();
+        if (inRequest)
+            return;
+        update();
+        if (codeExpires && QDateTime::currentSecsSinceEpoch() >= codeExpires) {
+            clearCode();
+            codeInfo->setText(text("The pairing code expired. Press Show QR / pairing phrase for a new one.",
+                                   "انتهى الكود. اضغط عرض QR / عبارة الاقتران للحصول على كود جديد."));
+        }
     });
     refreshDevices.start(5000);
     d.exec();

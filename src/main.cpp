@@ -62,12 +62,16 @@ int main(int argc, char **argv) {
             output({{"ok", true}, {"state", engine.control(doc.object(), uid)}});
             return 0;
         }
-        if (args.size() == 2 && (args[1] == "--daemon" || args[1] == "--resumed")) {
+        if (args.size() == 2 && (args[1] == "--daemon" || args[1] == "--resumed" || args[1] == "--sleeping")) {
             if (geteuid() != 0)
                 fail("Administrator privileges required.");
             umask(0022);
             if (args[1] == "--resumed") {
                 engine.resumed();
+                return 0;
+            }
+            if (args[1] == "--sleeping") {
+                engine.sleeping();
                 return 0;
             }
             engine.startup();

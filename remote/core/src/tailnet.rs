@@ -151,6 +151,12 @@ impl TailNode {
         Ok(result?)
     }
     pub fn login(&self) -> Result<()> {
+        self.localapi_post("login-interactive", "Tailscale login could not start")
+    }
+    pub fn logout(&self) -> Result<()> {
+        self.localapi_post("logout", "Tailscale sign out failed")
+    }
+    fn localapi_post(&self, endpoint: &str, failure: &str) -> Result<()> {
         use base64::Engine;
         let (mut addr, mut proxy, mut credential) =
             ([0 as c_char; 128], [0 as c_char; 33], [0 as c_char; 33]);
@@ -175,12 +181,12 @@ impl TailNode {
         let auth = base64::engine::general_purpose::STANDARD.encode(format!(":{credential}"));
         let mut stream = std::net::TcpStream::connect(addr)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        write!(stream,"POST /localapi/v0/login-interactive HTTP/1.0\r\nHost: {addr}\r\nAuthorization: Basic {auth}\r\nSec-Tailscale: localapi\r\nContent-Length: 0\r\n\r\n")?;
+        write!(stream,"POST /localapi/v0/{endpoint} HTTP/1.0\r\nHost: {addr}\r\nAuthorization: Basic {auth}\r\nSec-Tailscale: localapi\r\nContent-Length: 0\r\n\r\n")?;
         let mut response = String::new();
         stream.take(65536).read_to_string(&mut response)?;
         ensure!(
             response.starts_with("HTTP/1.0 2") || response.starts_with("HTTP/1.1 2"),
-            "Tailscale login could not start: {}",
+            "{failure}: {}",
             response.lines().next().unwrap_or("empty response")
         );
         Ok(())

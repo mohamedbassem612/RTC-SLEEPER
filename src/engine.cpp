@@ -94,7 +94,7 @@ QJsonObject idleState() {
                   {"message", ""},
                   {"updated", QDateTime::currentSecsSinceEpoch()}};
     for (auto k : {"config", "next_sleep", "next_wake", "expected_alarm", "actual_alarm", "actor",
-                   "cycle", "last_resume", "trigger", "scheduled_at"})
+                   "cycle", "last_resume", "last_sleep_at", "trigger", "scheduled_at"})
         s[k] = QJsonValue::Null;
     return s;
 }
@@ -351,6 +351,8 @@ QJsonObject Engine::control(const QJsonObject &r, qint64 uid) {
             auto fresh = idleState();
             fresh["actual_alarm"] = s["actual_alarm"];
             fresh["last_resume"] = s["last_resume"];
+            fresh["last_sleep_at"] = s["last_sleep_at"];
+            fresh["last_sleep_at"] = s["last_sleep_at"];
             save(fresh);
             s = fresh;
             event("schedule_removed", {{"actor", actor}});
@@ -436,6 +438,7 @@ void Engine::tick() {
                 if (host_.alarm() != alarmValue(s["next_wake"]))
                     fail("RTC changed immediately before suspend.");
                 s["status"] = "sleeping";
+                s["last_sleep_at"] = now;
                 s["trigger"] = QJsonObject{
                     {"created_by", s["actor"]}, {"executed_by", systemActor()}, {"at", now}};
                 save(s);
@@ -458,6 +461,12 @@ void Engine::tick() {
         save(s);
         event("engine_error", {{"result", "error"}, {"error", e.what()}});
     }
+}
+void Engine::sleeping() {
+    Lock lock(root_);
+    auto s = stateOrRecover();
+    s["last_sleep_at"] = host_.now();
+    save(s);
 }
 void Engine::resumed() {
     Lock lock(root_);

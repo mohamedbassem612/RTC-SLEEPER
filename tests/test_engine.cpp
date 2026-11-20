@@ -166,6 +166,26 @@ class Tests : public QObject {
         QVERIFY(e.state()["config"].isNull());
         QVERIFY(!h.rtc);
     }
+    void sleepAndWakeTimesAreRecorded() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(schedule(), 1000);
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        QCOMPARE(e.state()["last_sleep_at"].toInteger(), h.clock);
+        h.clock += 3600;
+        e.resumed();
+        QCOMPARE(e.state()["last_resume"].toInteger(), h.clock);
+        QCOMPARE(e.state()["status"].toString(), "idle");
+        QVERIFY(!e.state()["last_sleep_at"].isNull());
+        h.clock += 100;
+        e.sleeping();
+        h.clock += 50;
+        e.resumed();
+        QCOMPARE(e.state()["last_sleep_at"].toInteger(), h.clock - 50);
+        QCOMPARE(e.state()["last_resume"].toInteger(), h.clock);
+    }
     void manualSuspendBeforeDeadlineKeepsSchedule() {
         QTemporaryDir dir;
         FakeHost h;

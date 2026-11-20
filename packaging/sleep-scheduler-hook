@@ -1,4 +1,5 @@
 #!/bin/sh
-if [ "$1" = post ]; then
-    /usr/lib/rtc-sleeper/sleep-scheduler-engine --resumed
-fi
+case "$1" in
+    pre) /usr/lib/rtc-sleeper/sleep-scheduler-engine --sleeping || true ;;
+    post) /usr/lib/rtc-sleeper/sleep-scheduler-engine --resumed ;;
+esac

@@ -262,8 +262,8 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) != Some("serve") {
         let op = args.first().map(String::as_str).unwrap_or("status");
         ensure!(
-            ["status", "login", "pair", "regenerate", "revoke", "devices", "block", "allow", "remove", "enable", "disable"].contains(&op),
-            "Use serve | status | login | pair | regenerate | revoke | devices | block ID | allow ID | remove ID | enable | disable"
+            ["status", "login", "logout", "pair", "regenerate", "revoke", "devices", "block", "allow", "remove", "enable", "disable"].contains(&op),
+            "Use serve | status | login | logout | pair | regenerate | revoke | devices | block ID | allow ID | remove ID | enable | disable"
         );
         let mut stream = UnixStream::connect(&socket)
             .context("Remote service is not running. Start rtc-sleeper-remote serve")?;
@@ -394,6 +394,16 @@ fn main() -> Result<()> {
                             "login" => {
                                 node.as_ref().context("Mock does not need login")?.login()?;
                                 Ok(json!({"message":"Login requested; refresh status"}))
+                            }
+                            "logout" => {
+                                node.as_ref().context("Mock has no account")?.logout()?;
+                                let mut s = lock(&server);
+                                let before = serde_json::to_vec(&s.store)?;
+                                s.store.sessions.clear();
+                                s.store.pairing = None;
+                                s.store.blocked.clear();
+                                persist(&store_path, &s.store, &before)?;
+                                Ok(json!({"message":"Signed out; paired phones were cleared"}))
                             }
                             "revoke" => {
                                 let mut s = lock(&server);

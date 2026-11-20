@@ -40,6 +40,7 @@ class Engine {
     QJsonObject control(const QJsonObject &request, qint64 uid);
     void tick();
     void resumed();
+    void sleeping();
     void startup();
     void event(const QString &action, QJsonObject details = {});
 };

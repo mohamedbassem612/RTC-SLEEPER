@@ -5,6 +5,7 @@ use jni::{
     objects::{JObject, JString, JValue},
     JNIEnv, JavaVM,
 };
+use rtc_remote_core::presence::{dur, presence, schedule_label};
 use rtc_remote_core::{tailnet::TailNode, *};
 use serde_json::{json, Value};
 use std::{
@@ -176,6 +177,8 @@ struct Mobile {
     seq: u64,
     applied: u64,
     error_from_poll: bool,
+    seen_resume: Option<u64>,
+    banner: Option<(String, Instant)>,
     phrase: String,
     error: String,
     logs: String,
@@ -268,6 +271,8 @@ impl Mobile {
             seq: 0,
             applied: 0,
             error_from_poll: false,
+            seen_resume: None,
+            banner: None,
             phrase: String::new(),
             error: String::new(),
             logs: String::new(),
@@ -471,6 +476,19 @@ impl Mobile {
                     // that command's newer result.
                     if seq >= self.applied {
                         self.applied = seq;
+                        let new_resume = v["last_resume"].as_u64();
+                        let had_status = self.last_ok.is_some();
+                        let was_lost = self.last_ok.is_some_and(|t| t.elapsed() >= Duration::from_secs(15));
+                        if had_status {
+                            if new_resume.is_some_and(|n| self.seen_resume.is_none_or(|o| n > o)) {
+                                self.banner = Some(("Laptop woke up and is back online".into(), Instant::now()));
+                            } else if was_lost {
+                                self.banner = Some(("Laptop is back online".into(), Instant::now()));
+                            }
+                        }
+                        if new_resume.is_some() {
+                            self.seen_resume = new_resume;
+                        }
                         self.state = v;
                         self.last_ok = Some(Instant::now());
                         if !background || self.error_from_poll {
@@ -596,10 +614,11 @@ impl eframe::App for Mobile {
             }
         }
         // Silent refresh: never while an action is running or a confirmation is open.
+        let reachable = self.last_ok.is_some_and(|t| t.elapsed() < Duration::from_secs(15));
         if !self.busy
             && !self.polling
             && self.confirm.is_none()
-            && self.last_poll.elapsed() > Duration::from_secs(5)
+            && self.last_poll.elapsed() > Duration::from_secs(if reachable { 5 } else { 3 })
         {
             self.last_poll = Instant::now();
             if self.session.is_some() {
@@ -634,7 +653,14 @@ impl eframe::App for Mobile {
                 if ui.add_enabled(!self.busy,egui::Button::new("Pair Laptop").min_size(Vec2::new(ui.available_width(),46.))).clicked(){self.pair();}
                 ui.label("A pairing code lasts 15 minutes and works once. After pairing, approve this phone on the laptop and check that the Device ID matches.");
             }else{
-                let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("Waiting for laptop status").to_string();ui.heading(&status);if let Some(s)=&self.session{ui.small(format!("Device ID: {}",device_id(s)));}ui.label(if online{"Laptop online"}else if self.last_ok.is_some(){"Connection lost · showing last confirmed status"}else{"Laptop status has not been received yet"});
+                let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("").to_string();
+                let (heading,detail)=presence(&self.state,online,self.last_ok.is_some(),now());
+                ui.heading(heading);
+                if let Some(s)=&self.session{ui.small(format!("Device ID: {}",device_id(s)));}
+                if !detail.is_empty(){ui.label(detail);}
+                if let Some((text,at))=&self.banner{if at.elapsed()<Duration::from_secs(30){ui.colored_label(egui::Color32::from_rgb(80,200,120),text);}}
+                if self.last_ok.is_some(){ui.label(format!("Schedule: {}",schedule_label(&status)));}
+                if let Some(w)=self.state["last_resume"].as_u64(){let mut t=format!("Last woke up: {} ago",dur(now().saturating_sub(w)));if let Some(sl)=self.state["last_sleep_at"].as_u64().filter(|sl|*sl<=w){t+=&format!(" (slept for {})",dur(w-sl));}ui.label(t);}
                 if let Some(next)=self.state["next_sleep"].as_u64(){let seconds=next.saturating_sub(now());ui.label(format!("Will sleep in: {} h {} min {} s",seconds/3600,seconds/60%60,seconds%60));}
                 if let Some(message)=self.state["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
                 if ui.add_enabled(!self.busy,egui::Button::new("Refresh status")).clicked(){self.command("status",json!({}));}
