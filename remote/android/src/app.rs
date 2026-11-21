@@ -5,6 +5,7 @@ use jni::{
     objects::{JObject, JString, JValue},
     JNIEnv, JavaVM,
 };
+use rtc_remote_core::cache::PhoneCache;
 use rtc_remote_core::presence::{dur, presence, schedule_label};
 use rtc_remote_core::{tailnet::TailNode, *};
 use serde_json::{json, Value};
@@ -135,6 +136,8 @@ fn java_string(method: &str, arg: Option<&str>) -> Result<String> {
 enum Message {
     Node(Arc<TailNode>),
     Network(Value),
+    /// Result of a user-started sign in / sign out.
+    NetworkOp(Value),
     NetworkInfo(Value),
     Paired(Session),
     /// value, request sequence number, started by the background poller
@@ -179,6 +182,16 @@ struct Mobile {
     error_from_poll: bool,
     seen_resume: Option<u64>,
     banner: Option<(String, Instant)>,
+    settings_open: bool,
+    confirm_signout: bool,
+    open_when_ready: bool,
+    /// Unix time of the newest laptop data held here (live or restored from the saved copy).
+    data_epoch: Option<u64>,
+    /// True while the numbers on screen came only from the saved copy.
+    from_saved: bool,
+    cache_dirty: bool,
+    last_saved: Instant,
+    last_form: Value,
     phrase: String,
     error: String,
     logs: String,
@@ -273,6 +286,14 @@ impl Mobile {
             error_from_poll: false,
             seen_resume: None,
             banner: None,
+            settings_open: false,
+            confirm_signout: false,
+            open_when_ready: false,
+            data_epoch: None,
+            from_saved: false,
+            cache_dirty: false,
+            last_saved: Instant::now(),
+            last_form: json!(null),
             phrase: String::new(),
             error: String::new(),
             logs: String::new(),
@@ -289,8 +310,117 @@ impl Mobile {
             last_ok: None,
             demo,
         };
+        if app.session.is_some() {
+            app.load_cache();
+        }
+        app.last_form = app.form_value();
         app.start_network();
         app
+    }
+    fn cache_path() -> Option<PathBuf> {
+        activity().ok()?.internal_data_path().map(|d| d.join("phone-cache.json"))
+    }
+    fn form_value(&self) -> Value {
+        json!({"sh":self.sh,"sm":self.sm,"sp":self.sp,"wh":self.wh,"wm":self.wm,"wp":self.wp,
+               "now":self.now,"days":self.days})
+    }
+    fn load_cache(&mut self) {
+        let Some(c) = Self::cache_path().and_then(|p| PhoneCache::read(&p).ok().flatten()) else {
+            return;
+        };
+        let f = &c.form;
+        let int = |k: &str, lo: i64, hi: i64, d: i32| {
+            f[k].as_i64().map_or(d, |v| v.clamp(lo, hi) as i32)
+        };
+        self.sh = int("sh", 1, 12, self.sh);
+        self.sm = int("sm", 0, 59, self.sm);
+        self.wh = int("wh", 1, 12, self.wh);
+        self.wm = int("wm", 0, 59, self.wm);
+        self.sp = f["sp"].as_bool().unwrap_or(self.sp);
+        self.wp = f["wp"].as_bool().unwrap_or(self.wp);
+        self.now = f["now"].as_bool().unwrap_or(false);
+        if let Some(days) = f["days"].as_array() {
+            for (i, d) in days.iter().take(7).enumerate() {
+                self.days[i] = d.as_bool().unwrap_or(false);
+            }
+        }
+        if c.state.is_object() && c.saved > 0 {
+            self.seen_resume = c.state["last_resume"].as_u64();
+            self.state = c.state;
+            self.data_epoch = Some(c.saved);
+            self.from_saved = true;
+        }
+        self.logs = c.logs;
+    }
+    fn save_cache(&mut self) {
+        self.cache_dirty = false;
+        self.last_saved = Instant::now();
+        if self.session.is_none() {
+            return;
+        }
+        if let Some(path) = Self::cache_path() {
+            let _ = PhoneCache {
+                saved: self.data_epoch.unwrap_or(0),
+                form: self.form_value(),
+                state: self.state.clone(),
+                logs: self.logs.clone(),
+            }
+            .write(&path);
+        }
+    }
+    fn clear_saved(&mut self) {
+        if let Some(path) = Self::cache_path() {
+            PhoneCache::clear(&path);
+        }
+        self.state = json!({});
+        self.logs.clear();
+        self.data_epoch = None;
+        self.from_saved = false;
+        self.seen_resume = None;
+        self.cache_dirty = false;
+    }
+    fn forget_laptop(&mut self) {
+        let _ = java_string("storeSession", Some(""));
+        self.clear_saved();
+        self.session = None;
+        self.last_ok = None;
+    }
+    fn apply_network(&mut self, v: Value) {
+        if self.open_when_ready {
+            if let Some(url) = v["AuthURL"].as_str().filter(|u| u.starts_with("https://login.tailscale.com/")) {
+                self.open_when_ready = false;
+                let _ = java_string("openBrowser", Some(url));
+            }
+        }
+        self.network = v;
+    }
+    /// Sign in or out of Tailscale on this phone (runs off the UI thread).
+    fn network_account(&mut self, sign_out: bool) {
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.error.clear();
+        self.open_when_ready = !sign_out;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Value> {
+                if sign_out {
+                    node.logout()?;
+                } else {
+                    node.login()?;
+                }
+                std::thread::sleep(Duration::from_millis(600));
+                node.status()
+            })();
+            let _ = tx.send(match result {
+                Ok(v) => Message::NetworkOp(v),
+                Err(e) => Message::Error(e.to_string(), transient(&e), false),
+            });
+        });
     }
     fn start_network(&mut self) {
         if self.busy {
@@ -449,7 +579,13 @@ impl Mobile {
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             v["BackendState"].as_str().unwrap_or("").into();
                     }
-                    self.network = v;
+                    self.apply_network(v);
+                }
+                Message::NetworkOp(v) => {
+                    self.busy = false;
+                    self.polling = false;
+                    self.error.clear();
+                    self.apply_network(v);
                 }
                 Message::Paired(session) => {
                     self.busy = false;
@@ -477,19 +613,26 @@ impl Mobile {
                     if seq >= self.applied {
                         self.applied = seq;
                         let new_resume = v["last_resume"].as_u64();
-                        let had_status = self.last_ok.is_some();
-                        let was_lost = self.last_ok.is_some_and(|t| t.elapsed() >= Duration::from_secs(15));
+                        let had_status = self.last_ok.is_some() || self.from_saved;
+                        let was_lost = self
+                            .last_ok
+                            .is_some_and(|t| t.elapsed() >= Duration::from_secs(15));
                         if had_status {
                             if new_resume.is_some_and(|n| self.seen_resume.is_none_or(|o| n > o)) {
-                                self.banner = Some(("Laptop woke up and is back online".into(), Instant::now()));
+                                self.banner =
+                                    Some(("Laptop woke up and is back online".into(), Instant::now()));
                             } else if was_lost {
-                                self.banner = Some(("Laptop is back online".into(), Instant::now()));
+                                self.banner =
+                                    Some(("Laptop is back online".into(), Instant::now()));
                             }
                         }
                         if new_resume.is_some() {
                             self.seen_resume = new_resume;
                         }
                         self.state = v;
+                        self.data_epoch = Some(now());
+                        self.from_saved = false;
+                        self.cache_dirty = true;
                         self.last_ok = Some(Instant::now());
                         if !background || self.error_from_poll {
                             self.error.clear();
@@ -500,6 +643,7 @@ impl Mobile {
                 Message::Logs(v) => {
                     self.busy = false;
                     self.logs = serde_json::to_string_pretty(&v).unwrap_or_default();
+                    self.cache_dirty = true;
                     self.last_ok = Some(Instant::now());
                 }
                 Message::Error(e, is_transient, background) => {
@@ -529,6 +673,97 @@ impl Mobile {
                 }
                 Message::NetworkInfo(_) => unreachable!(),
             }
+        }
+    }
+}
+impl Mobile {
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        let red = Color32::from_rgb(255, 150, 150);
+        ui.add_space(22.);
+        ui.horizontal(|ui| {
+            if ui.button("Back").clicked() {
+                self.settings_open = false;
+                self.confirm_signout = false;
+            }
+            ui.heading("Settings");
+        });
+        ui.separator();
+        if !self.error.is_empty() {
+            ui.colored_label(red, &self.error);
+        }
+        ui.heading("Private network (Tailscale)");
+        let state = self.network["BackendState"]
+            .as_str()
+            .unwrap_or(if self.node.is_none() { "Not started" } else { "Starting" })
+            .to_string();
+        let running = state == "Running";
+        let uid = self.network["Self"]["UserID"].as_i64().unwrap_or(0).to_string();
+        let who = self.network["User"][uid.as_str()]["LoginName"].as_str().filter(|s| !s.is_empty());
+        ui.label(if running {
+            match who {
+                Some(w) => format!("Signed in as {w}"),
+                None => "Signed in".to_string(),
+            }
+        } else {
+            format!("Not signed in ({state})")
+        });
+        if self.busy || self.polling {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Working…");
+            });
+        }
+        if let Some(url) = self.network["AuthURL"]
+            .as_str()
+            .filter(|u| u.starts_with("https://login.tailscale.com/"))
+            .map(str::to_string)
+        {
+            if !running && ui.button("Finish signing in in the browser").clicked() {
+                let _ = java_string("openBrowser", Some(&url));
+            }
+        }
+        let idle = !self.busy && !self.polling;
+        if running {
+            if self.confirm_signout {
+                ui.label("Sign out of Tailscale? You will need to sign in again before you can control the laptop.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_signout = false;
+                    }
+                    if ui.add_enabled(idle, egui::Button::new("Sign out")).clicked() {
+                        self.confirm_signout = false;
+                        self.network_account(true);
+                    }
+                });
+            } else if ui.add_enabled(idle, egui::Button::new("Sign out")).clicked() {
+                self.confirm_signout = true;
+            }
+        } else if self.node.is_none() {
+            if !self.busy && ui.button("Connect private network").clicked() {
+                self.start_network();
+            }
+        } else if ui.add_enabled(idle, egui::Button::new("Sign in")).clicked() {
+            self.network_account(false);
+        }
+        ui.separator();
+        ui.heading("Paired laptop");
+        if let Some(s) = &self.session {
+            ui.label(format!("Device ID: {}", device_id(s)));
+            if ui.button("Forget this laptop").clicked() {
+                self.forget_laptop();
+                self.settings_open = false;
+            }
+        } else {
+            ui.label("No laptop paired.");
+        }
+        ui.separator();
+        ui.heading("Saved on this phone");
+        ui.label("The schedule fields, the last laptop status and the logs are kept on this phone so they stay visible while the laptop sleeps. The laptop holds the real schedule. Tailscale only carries the connection and stores nothing.");
+        if let Some(at) = self.data_epoch {
+            ui.label(format!("Laptop data saved {} ago.", dur(now().saturating_sub(at))));
+        }
+        if ui.button("Clear saved data").clicked() {
+            self.clear_saved();
         }
     }
 }
@@ -614,6 +849,14 @@ impl eframe::App for Mobile {
             }
         }
         // Silent refresh: never while an action is running or a confirmation is open.
+        let form = self.form_value();
+        if form != self.last_form {
+            self.last_form = form;
+            self.cache_dirty = true;
+        }
+        if self.cache_dirty && self.last_saved.elapsed() > Duration::from_secs(2) {
+            self.save_cache();
+        }
         let reachable = self.last_ok.is_some_and(|t| t.elapsed() < Duration::from_secs(15));
         if !self.busy
             && !self.polling
@@ -628,7 +871,8 @@ impl eframe::App for Mobile {
             }
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK).inner_margin(20)).show(ctx,|ui|{egui::ScrollArea::vertical().show(ui,|ui|{
-            ui.add_space(22.);ui.heading(RichText::new("RTC Sleeper").size(30.));ui.label("Private remote control · Rust");ui.separator();
+            if self.settings_open{self.settings_ui(ui);return;}
+            ui.add_space(22.);ui.horizontal(|ui|{ui.heading(RichText::new("RTC Sleeper").size(30.));ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.button("Settings").clicked(){self.settings_open=true;}});});ui.label("Private remote control · Rust");ui.separator();
             if self.demo{ui.colored_label(Color32::YELLOW,"TEST MODE — simulated laptop only");}
             if self.busy{ui.horizontal(|ui|{ui.spinner();ui.label(if self.node.is_none(){"Starting private network…"}else{"Refreshing connection…"});});}
             if !self.error.is_empty(){ui.colored_label(Color32::from_rgb(255,150,150),&self.error);}
@@ -636,15 +880,13 @@ impl eframe::App for Mobile {
                 let network_state=self.network["BackendState"].as_str().unwrap_or("Starting");
                 if network_state!="Running" {
                     ui.label(format!("Private network: {network_state}"));
-                    if let Some(url)=self.network["AuthURL"].as_str().filter(|s|s.starts_with("https://login.tailscale.com/")) {
-                        if ui.button("Sign in to Tailscale").clicked(){let _=java_string("openBrowser",Some(url));}
-                    }
+                    if ui.button("Open Settings to sign in").clicked(){self.settings_open=true;}
                     if self.node.is_none() && !self.busy && ui.button("Reconnect private network").clicked(){self.start_network();}
                 }
             }
             if self.session.is_none(){
                 ui.heading("1. Private network");let running=self.network["BackendState"]=="Running";ui.label(if running{"Connected to your private network"}else{"Sign in once to your Tailscale account"});
-                if let Some(url)=self.network["AuthURL"].as_str().filter(|s|s.starts_with("https://login.tailscale.com/")){if ui.button("Sign in to Tailscale").clicked(){let _=java_string("openBrowser",Some(url));}}
+                if !running&&ui.button("Open Settings to sign in").clicked(){self.settings_open=true;}
                 if self.node.is_none()&&!self.busy&&ui.button("Connect private network").clicked(){self.start_network();}
                 ui.separator();ui.heading("2. Pair your laptop");ui.label("On your laptop: Settings > Remote Control > New pairing code.");
                 if ui.button("Scan QR Code").clicked(){if let Err(e)=java_string("scanQr",None){self.error=e.to_string();}}
@@ -654,12 +896,13 @@ impl eframe::App for Mobile {
                 ui.label("A pairing code lasts 15 minutes and works once. After pairing, approve this phone on the laptop and check that the Device ID matches.");
             }else{
                 let online=self.last_ok.map(|t|t.elapsed()<Duration::from_secs(15)).unwrap_or(false);let status=self.state["status"].as_str().unwrap_or("").to_string();
-                let (heading,detail)=presence(&self.state,online,self.last_ok.is_some(),now());
+                let heard=self.last_ok.is_some()||self.from_saved;let (heading,detail)=presence(&self.state,online,heard,now());
                 ui.heading(heading);
                 if let Some(s)=&self.session{ui.small(format!("Device ID: {}",device_id(s)));}
                 if !detail.is_empty(){ui.label(detail);}
                 if let Some((text,at))=&self.banner{if at.elapsed()<Duration::from_secs(30){ui.colored_label(egui::Color32::from_rgb(80,200,120),text);}}
-                if self.last_ok.is_some(){ui.label(format!("Schedule: {}",schedule_label(&status)));}
+                if self.from_saved&&!online{if let Some(at)=self.data_epoch{ui.label(format!("Showing saved data from {} ago.",dur(now().saturating_sub(at))));}}
+                if heard{ui.label(format!("Schedule: {}",schedule_label(&status)));}
                 if let Some(w)=self.state["last_resume"].as_u64(){let mut t=format!("Last woke up: {} ago",dur(now().saturating_sub(w)));if let Some(sl)=self.state["last_sleep_at"].as_u64().filter(|sl|*sl<=w){t+=&format!(" (slept for {})",dur(w-sl));}ui.label(t);}
                 if let Some(next)=self.state["next_sleep"].as_u64(){let seconds=next.saturating_sub(now());ui.label(format!("Will sleep in: {} h {} min {} s",seconds/3600,seconds/60%60,seconds%60));}
                 if let Some(message)=self.state["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
@@ -670,7 +913,6 @@ impl eframe::App for Mobile {
                     if ui.add(egui::Button::new("Apply Schedule").min_size(Vec2::new(ui.available_width(),48.))).clicked(){let p=self.configuration();if let Err(e)=validate_operation("schedule",&p){self.error=e.to_string();}else{self.confirm=Some(("schedule".into(),p));}}
                     ui.horizontal_wrapped(|ui|{for(op,label)in[(if status=="paused"{"resume"}else{"pause"},if status=="paused"{"Resume"}else{"Pause"}),("cancel","Remove"),("logs","Logs")]{if ui.button(label).clicked(){if op=="logs"{self.command(op,json!({"limit":50}));}else{self.confirm=Some((op.into(),json!({})));}}}});
                 });
-                if ui.button("Forget this laptop").clicked(){let _=java_string("storeSession",Some(""));self.session=None;self.state=json!({});self.last_ok=None;}
                 if !self.logs.is_empty(){egui::CollapsingHeader::new("Activity logs").default_open(true).show(ui,|ui|{ui.add(egui::TextEdit::multiline(&mut self.logs).desired_rows(10).interactive(false));});}
             }
             ui.add_space(30.);

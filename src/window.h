@@ -56,6 +56,7 @@ class Window : public QWidget {
     QWidget *makeForm();
     QWidget *makeDashboard();
     void build();
+    QJsonObject remoteRequest(QWidget *blocker, const QString &op, const QString &id = QString());
     void autoRefresh();
     void applyStatus(QJsonObject fresh);
     QJsonObject runBlocking(std::function<QJsonObject()> fn);

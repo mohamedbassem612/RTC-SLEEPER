@@ -178,7 +178,8 @@ class Tests : public QObject {
         e.resumed();
         QCOMPARE(e.state()["last_resume"].toInteger(), h.clock);
         QCOMPARE(e.state()["status"].toString(), "idle");
-        QVERIFY(!e.state()["last_sleep_at"].isNull());
+        QVERIFY(!e.state()["last_sleep_at"].isNull()); // survives the cycle reset
+        // A manual suspend (no schedule) is recorded by the pre/post hooks too.
         h.clock += 100;
         e.sleeping();
         h.clock += 50;

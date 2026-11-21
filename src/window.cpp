@@ -839,6 +839,46 @@ void Window::logsDialog() {
     load();
     d.exec();
 }
+// Runs rtc-sleeper-remote without blocking the event loop. When `blocker` is given it is
+// disabled meanwhile; pass nullptr for silent background refreshes that must not flicker.
+QJsonObject Window::remoteRequest(QWidget *blocker, const QString &op, const QString &id) {
+    auto executable = QStandardPaths::findExecutable("rtc-sleeper-remote");
+    if (executable.isEmpty())
+        executable = QDir::homePath() + "/.local/bin/rtc-sleeper-remote";
+    QProcess p;
+    QStringList arguments{op};
+    if (!id.isEmpty())
+        arguments << id;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&p, &QProcess::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&p, &QProcess::errorOccurred, &loop, &QEventLoop::quit);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    if (blocker)
+        blocker->setEnabled(false);
+    p.start(executable, arguments);
+    if (p.state() != QProcess::NotRunning) {
+        timeout.start(9000);
+        loop.exec();
+    }
+    if (blocker)
+        blocker->setEnabled(true);
+    if (p.state() != QProcess::NotRunning) {
+        p.kill();
+        p.waitForFinished();
+        throw std::runtime_error("The remote service did not answer in time. It may be busy; try again.");
+    }
+    if (p.error() == QProcess::FailedToStart)
+        throw std::runtime_error("Install/start the remote service: bash scripts/install-remote.sh");
+    auto bytes = p.readAllStandardOutput();
+    if (p.exitCode() != 0)
+        throw std::runtime_error(p.readAllStandardError().toStdString());
+    auto result = QJsonDocument::fromJson(bytes);
+    if (!result.isObject())
+        throw std::runtime_error("Invalid response from remote service");
+    return result.object();
+}
 void Window::remoteDialog() {
     QDialog d(this);
     d.setWindowTitle(text("Remote Control · Android", "التحكم عن بعد · أندرويد"));
@@ -847,8 +887,6 @@ void Window::remoteDialog() {
     auto *status = label("", "muted");
     status->setWordWrap(true);
     l->addWidget(status);
-    auto *account = button(text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
-    l->addWidget(account);
     auto *generate = button(text("Show QR / pairing phrase", "عرض QR / عبارة الاقتران"), "primary");
     l->addWidget(generate);
     auto *qr = new QLabel;
@@ -868,7 +906,7 @@ void Window::remoteDialog() {
     l->addWidget(codeInfo);
     auto *instructions =
         label(text("Scan this QR or enter the phrase on the phone. The code is valid for 15 minutes and pairs one phone only. Each new phone needs Allow selected below before controlling this laptop.",
-                   "امسح QR أو أدخل العبارة على الهاتف. الكود صالح 15 دقيقة ويقترن بهاتف واحد فقط. لازم تسمح لكل هاتف جديد من القائمة بالأسفل."),
+                   "امسح QR أو أدخل العبارة على الهاتف. الكود صالح 15 دقيقة ويقترن به هاتف واحد فقط. لازم تسمح لكل هاتف جديد من القائمة بالأسفل."),
               "muted");
     instructions->setWordWrap(true);
     l->addWidget(instructions);
@@ -899,67 +937,32 @@ void Window::remoteDialog() {
     l->addLayout(permissions);
     auto *revoke = button(text("Revoke all paired phones", "إلغاء صلاحية كل الهواتف"));
     l->addWidget(revoke);
-    QString loginUrl, currentPhrase;
+    QString currentPhrase;
     qint64 codeExpires = 0;
-    bool signedIn = false, inRequest = false;
+    bool inRequest = false;
     auto request = [&](const QString &op, const QString &id = QString()) {
-        auto executable = QStandardPaths::findExecutable("rtc-sleeper-remote");
-        if (executable.isEmpty())
-            executable = QDir::homePath() + "/.local/bin/rtc-sleeper-remote";
-        QProcess p;
-        QStringList arguments{op};
-        if (!id.isEmpty()) arguments << id;
-        // Asynchronous with a local event loop: the dialog stays painted and responsive.
-        QEventLoop loop;
-        QTimer timeout;
-        timeout.setSingleShot(true);
-        QObject::connect(&p, &QProcess::finished, &loop, &QEventLoop::quit);
-        QObject::connect(&p, &QProcess::errorOccurred, &loop, &QEventLoop::quit);
-        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-        inRequest = true;
-        d.setEnabled(false);
-        p.start(executable, arguments);
-        if (p.state() != QProcess::NotRunning) {
-            timeout.start(9000);
-            loop.exec();
-        }
-        d.setEnabled(true);
-        inRequest = false;
-        if (p.state() != QProcess::NotRunning) {
-            p.kill();
-            p.waitForFinished();
-            throw std::runtime_error(
-                "The remote service did not answer in time. It may be busy; try again.");
-        }
-        if (p.error() == QProcess::FailedToStart)
-            throw std::runtime_error(
-                "Install/start the remote service: bash scripts/install-remote.sh");
-        auto bytes = p.readAllStandardOutput();
-        if (p.exitCode() != 0)
-            throw std::runtime_error(p.readAllStandardError().toStdString());
-        auto result = QJsonDocument::fromJson(bytes);
-        if (!result.isObject())
-            throw std::runtime_error("Invalid response from remote service");
-        return result.object();
+        struct Guard {
+            bool &flag;
+            explicit Guard(bool &f) : flag(f) { flag = true; }
+            ~Guard() { flag = false; }
+        } guard(inRequest);
+        return remoteRequest(&d, op, id);
     };
     auto update = [&] {
         try {
             auto s = request("status");
-            loginUrl = s["AuthURL"].toString();
             bool ready = s["BackendState"] == "Running";
             status->setText(
                 ready ? text("Private network connected. A pairing code lasts 15 minutes and pairs one phone. "
                              "Compare the device ID with the one shown on the phone before choosing Allow.",
                              "الشبكة الخاصة متصلة. كود الاقتران صالح 15 دقيقة ويقترن به هاتف واحد. "
                              "قارن رقم الجهاز بالظاهر على الهاتف قبل الضغط على السماح.")
-                      : text("Sign in with the same Tailscale account used in the Android app.",
-                             "سجّل الدخول بنفس حساب Tailscale المستخدم في تطبيق أندرويد."));
+                      : text("Not signed in to Tailscale. Open Settings > Private network to sign in "
+                             "with the same account used in the Android app.",
+                             "غير مسجّل الدخول في Tailscale. افتح الإعدادات > الشبكة الخاصة وسجّل بنفس "
+                             "الحساب المستخدم في تطبيق أندرويد."));
             generate->setEnabled(ready);
             regenerate->setEnabled(ready);
-            signedIn = ready;
-            account->setText(ready ? text("Sign out of private network", "تسجيل الخروج من الشبكة الخاصة")
-                                   : text("Sign in to private network", "تسجيل الدخول للشبكة الخاصة"));
-            account->setEnabled(true);
             auto access = request("devices");
             enabled->setChecked(access["enabled"].toBool());
             accessLabel->setText(access["enabled"].toBool() ? text("Remote access: ON", "التحكم عن بعد: مفعّل") : text("Remote access: OFF", "التحكم عن بعد: متوقف"));
@@ -998,34 +1001,6 @@ void Window::remoteDialog() {
         codeInfo->clear();
         copy->setEnabled(false);
     };
-    connect(account, &QPushButton::clicked, &d, [&] {
-        try {
-            if (signedIn) {
-                if (QMessageBox::question(
-                        &d, text("Sign out?", "تسجيل الخروج؟"),
-                        text("This laptop will leave your Tailscale network and every paired phone will be "
-                             "cleared. You can sign in with a different account afterwards.",
-                             "سيخرج هذا الكمبيوتر من شبكة Tailscale وسيتم مسح كل الهواتف المقترنة. "
-                             "يمكنك تسجيل الدخول بحساب مختلف بعد ذلك.")) != QMessageBox::Yes)
-                    return;
-                request("logout");
-                clearCode();
-                update();
-                status->setText(text("Signed out. Press Sign in to use another account.",
-                                     "تم تسجيل الخروج. اضغط تسجيل الدخول لاستخدام حساب آخر."));
-                return;
-            }
-            request("login");
-            update();
-            if (loginUrl.startsWith("https://login.tailscale.com/"))
-                QDesktopServices::openUrl(QUrl(loginUrl));
-            else
-                status->setText(text("Login starting; refresh in a moment.",
-                                     "تسجيل الدخول يبدأ؛ اضغط تحديث بعد لحظات."));
-        } catch (const std::exception &e) {
-            status->setText(e.what());
-        }
-    });
     auto showPairing = [&](const QString &op) {
         try {
             auto ticket = request(op);
@@ -1033,6 +1008,8 @@ void Window::remoteDialog() {
             image.loadFromData(QByteArray::fromBase64(ticket["qr_png"].toString().toUtf8()), "PNG");
             qr->setPixmap(image.scaled(220, 220, Qt::KeepAspectRatio, Qt::FastTransformation));
             currentPhrase = ticket["phrase"].toString();
+            // Numbered, four per line. The first words are the same for every code from this
+            // laptop (they encode the format and its network address); the rest are random.
             QStringList lines, row;
             int n = 0;
             for (const auto &w : currentPhrase.split(' ', Qt::SkipEmptyParts)) {
@@ -1064,6 +1041,7 @@ void Window::remoteDialog() {
         QGuiApplication::clipboard()->setText(copied);
         copy->setText(text("Copied (clears in 60 s)", "تم النسخ (يُمسح بعد 60 ثانية)"));
         QTimer::singleShot(2500, &d, [&] { copy->setText(text("Copy phrase", "نسخ العبارة")); });
+        // The code is a credential: do not leave it on the clipboard.
         QTimer::singleShot(60000, qApp, [copied] {
             auto *clipboard = QGuiApplication::clipboard();
             if (clipboard->text() == copied)
@@ -1104,7 +1082,7 @@ void Window::remoteDialog() {
 void Window::settingsDialog() {
     QDialog d(this);
     d.setWindowTitle(text("Settings", "الإعدادات"));
-    d.setFixedSize(440, 330);
+    d.setFixedSize(440, 500);
     auto *l = new QVBoxLayout(&d);
     l->setContentsMargins(24, 24, 24, 24);
     l->addWidget(label(text("Language", "اللغة"), "heading"));
@@ -1112,6 +1090,89 @@ void Window::settingsDialog() {
     lang->addItems({"English", "العربية"});
     lang->setCurrentIndex(arabic_ ? 1 : 0);
     l->addWidget(lang);
+    l->addWidget(label(text("Private network (Tailscale)", "الشبكة الخاصة (Tailscale)"), "heading"));
+    auto *netStatus = label("", "muted");
+    netStatus->setWordWrap(true);
+    l->addWidget(netStatus);
+    auto *account = button(text("Sign in", "تسجيل الدخول"));
+    l->addWidget(account);
+    QString loginUrl, openedUrl;
+    bool signedIn = false, netBusy = false, openWhenReady = false;
+    // quiet=true: background refresh that never disables the dialog (no flicker).
+    auto refreshNetwork = [&](bool quiet) {
+        if (netBusy)
+            return;
+        netBusy = true;
+        try {
+            auto st = remoteRequest(quiet ? nullptr : &d, "status");
+            loginUrl = st["AuthURL"].toString();
+            auto backend = st["BackendState"].toString();
+            signedIn = backend == "Running";
+            // The sign-in link can arrive a moment after the request: open it once it does.
+            if (openWhenReady && loginUrl.startsWith("https://login.tailscale.com/") &&
+                loginUrl != openedUrl) {
+                openedUrl = loginUrl;
+                openWhenReady = false;
+                QDesktopServices::openUrl(QUrl(loginUrl));
+            }
+            QString who;
+            auto self = st["Self"].toObject();
+            auto user = st["User"].toObject()[QString::number(self["UserID"].toInteger())].toObject();
+            if (!user["LoginName"].toString().isEmpty())
+                who = user["LoginName"].toString();
+            if (signedIn)
+                netStatus->setText(who.isEmpty() ? text("Signed in.", "مسجّل الدخول.")
+                                                 : text("Signed in as ", "مسجّل الدخول باسم ") + who);
+            else if (backend == "NeedsLogin" && loginUrl.isEmpty())
+                netStatus->setText(text("Not signed in.", "غير مسجّل الدخول."));
+            else if (!loginUrl.isEmpty())
+                netStatus->setText(text("Waiting for you to finish signing in in the browser.",
+                                        "بانتظار إتمام تسجيل الدخول في المتصفح."));
+            else
+                netStatus->setText(text("Private network: ", "الشبكة الخاصة: ") + backend);
+            account->setText(signedIn ? text("Sign out", "تسجيل الخروج") : text("Sign in", "تسجيل الدخول"));
+            account->setEnabled(true);
+        } catch (const std::exception &e) {
+            netStatus->setText(e.what());
+            account->setEnabled(false);
+        }
+        netBusy = false;
+    };
+    connect(account, &QPushButton::clicked, &d, [&] {
+        if (netBusy)
+            return;
+        try {
+            if (signedIn) {
+                if (QMessageBox::question(
+                        &d, text("Sign out?", "تسجيل الخروج؟"),
+                        text("This laptop will leave your Tailscale network and every paired phone will be "
+                             "cleared. You can sign in with a different account afterwards.",
+                             "سيخرج هذا الكمبيوتر من شبكة Tailscale وسيتم مسح كل الهواتف المقترنة. "
+                             "يمكنك تسجيل الدخول بحساب مختلف بعد ذلك.")) != QMessageBox::Yes)
+                    return;
+                netBusy = true;
+                remoteRequest(&d, "logout");
+                netBusy = false;
+                netStatus->setText(text("Signed out. Press Sign in to use another account.",
+                                        "تم تسجيل الخروج. اضغط تسجيل الدخول لاستخدام حساب آخر."));
+                refreshNetwork(false);
+                return;
+            }
+            netBusy = true;
+            remoteRequest(&d, "login");
+            netBusy = false;
+            openWhenReady = true;
+            refreshNetwork(false);
+        } catch (const std::exception &e) {
+            netBusy = false;
+            netStatus->setText(e.what());
+        }
+    });
+    QTimer netTimer;
+    netTimer.setInterval(3000);
+    connect(&netTimer, &QTimer::timeout, &d, [&] { refreshNetwork(true); });
+    refreshNetwork(false);
+    netTimer.start();
     auto *logs = button(text("Activity Logs", "سجل النشاط"));
     l->addWidget(logs);
     connect(logs, &QPushButton::clicked, this, &Window::logsDialog);

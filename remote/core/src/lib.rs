@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod presence;
 pub mod tailnet;
 use anyhow::{bail, ensure, Context, Result};

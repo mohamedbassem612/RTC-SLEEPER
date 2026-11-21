@@ -397,6 +397,8 @@ fn main() -> Result<()> {
                             }
                             "logout" => {
                                 node.as_ref().context("Mock has no account")?.logout()?;
+                                // Phones were paired to this account's network: they cannot
+                                // reach the laptop after a different sign-in, so clear them.
                                 let mut s = lock(&server);
                                 let before = serde_json::to_vec(&s.store)?;
                                 s.store.sessions.clear();

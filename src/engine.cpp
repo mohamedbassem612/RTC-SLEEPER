@@ -352,7 +352,6 @@ QJsonObject Engine::control(const QJsonObject &r, qint64 uid) {
             fresh["actual_alarm"] = s["actual_alarm"];
             fresh["last_resume"] = s["last_resume"];
             fresh["last_sleep_at"] = s["last_sleep_at"];
-            fresh["last_sleep_at"] = s["last_sleep_at"];
             save(fresh);
             s = fresh;
             event("schedule_removed", {{"actor", actor}});

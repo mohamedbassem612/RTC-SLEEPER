@@ -40,7 +40,7 @@ class Engine {
     QJsonObject control(const QJsonObject &request, qint64 uid);
     void tick();
     void resumed();
-    void sleeping();
+    void sleeping(); // pre-suspend hook: records when the laptop went to sleep
     void startup();
     void event(const QString &action, QJsonObject details = {});
 };

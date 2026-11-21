@@ -153,6 +153,7 @@ impl TailNode {
     pub fn login(&self) -> Result<()> {
         self.localapi_post("login-interactive", "Tailscale login could not start")
     }
+    /// Signs this laptop out of the Tailscale account so another account can be used.
     pub fn logout(&self) -> Result<()> {
         self.localapi_post("logout", "Tailscale sign out failed")
     }

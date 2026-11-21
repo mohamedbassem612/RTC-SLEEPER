@@ -14,8 +14,8 @@ The Android UI, pairing protocol, validation and remote client are Rust. A small
    bash scripts/install-remote.sh ./rtc-sleeper-remote ./libtailscale.so
    ```
 
-3. In the desktop app select **Settings → Remote Control → Sign in to private network**. Authenticate in your browser with your Tailscale account, then refresh the connection.
-4. Install the signed Android APK. Open RTC Sleeper, sign into the **same tailnet**, then return to the app.
+3. In the desktop app select **Settings → Private network → Sign in** (the same place offers **Sign out** to switch accounts). Authenticate in your browser with your Tailscale account; pairing codes are then under **Settings → Remote Control**.
+4. Install the signed Android APK. Open RTC Sleeper, tap **Settings → Sign in** and use the **same tailnet**, then return to the app. Sign out and **Forget this laptop** are in the same Settings screen.
 5. On the desktop open **Settings → Remote Control**. The QR and **24-word pairing phrase** appear automatically once connected. On Android choose **Scan QR Code**, or enter/paste the phrase, then select **Pair Laptop**. Select the new phone in the desktop list and click **Allow selected**. Until approved, it cannot read status or send commands. Use the same QR/phrase to add another phone; each needs separate approval.
 
 Tailscale enrollment and application pairing are separate. The QR/phrase authorizes this phone to control this laptop; it does not contain a Tailscale auth key or bypass network enrollment. Camera permission is requested only when scanning. Phrase entry works without a camera.
