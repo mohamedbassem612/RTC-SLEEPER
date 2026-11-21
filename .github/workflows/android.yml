@@ -1,4 +1,4 @@
-name: Android Rust build and release
+name: Android APK build and release
 env:
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -66,32 +66,18 @@ jobs:
       - name: Build debug APK for pull requests
         if: github.event_name == 'pull_request'
         run: bash scripts/build-android.sh debug
-      - name: Build desktop companion archive
+      - name: Collect installable APK
         run: |
-          mkdir -p dist/rtc-sleeper-remote/scripts
-          bash scripts/build-tailnet.sh linux dist/rtc-sleeper-remote
-          cargo build --locked --manifest-path remote/Cargo.toml -p rtc-sleeper-remote --release --jobs 2
-          cp remote/target/release/rtc-sleeper-remote dist/rtc-sleeper-remote/
-          cp scripts/install-remote.sh dist/rtc-sleeper-remote/scripts/
-          cp -a packaging dist/rtc-sleeper-remote/
-          cp docs/ANDROID.md dist/rtc-sleeper-remote/README.md
-          tar -C dist -czf dist/rtc-sleeper-remote-linux-x86_64.tar.gz rtc-sleeper-remote
-      - name: Collect installable APK and checksums
-        run: |
+          mkdir -p dist/android
           if [[ '${{ github.event_name }}' == pull_request ]]; then
-            cp android/app/build/outputs/apk/debug/*.apk dist/
+            cp android/app/build/outputs/apk/debug/*.apk dist/android/
           else
-            cp android/app/build/outputs/apk/release/*.apk dist/
+            cp android/app/build/outputs/apk/release/*.apk dist/android/
           fi
-          cd dist
-          sha256sum *.apk *.tar.gz > SHA256SUMS-android
       - uses: actions/upload-artifact@v4
         with:
-          name: rtc-sleeper-android-${{ github.sha }}
-          path: |
-            dist/*.apk
-            dist/*.tar.gz
-            dist/SHA256SUMS-android
+          name: rtc-sleeper-android-apk-${{ github.sha }}
+          path: dist/android/*.apk
           if-no-files-found: error
       - name: Publish Android release
         if: startsWith(github.ref, 'refs/tags/android-v')
@@ -101,8 +87,6 @@ jobs:
           generate_release_notes: true
           make_latest: false
           files: |
-            dist/*.apk
-            dist/*.tar.gz
-            dist/SHA256SUMS-android
+            dist/android/*.apk
     permissions:
       contents: write

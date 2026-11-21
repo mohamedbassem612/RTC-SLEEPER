@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
 #endif
     QCoreApplication::setApplicationName("RTC Sleeper");
     QCoreApplication::setOrganizationName("RTCSleeper");
-    QCoreApplication::setApplicationVersion("2.0.0");
+    QCoreApplication::setApplicationVersion("2.0.1");
     try {
 #ifndef RTC_HEADLESS
         if (gui) {
@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (p.isSet("version")) {
-            QTextStream(stdout) << "2.0.0\n";
+            QTextStream(stdout) << "2.0.1\n";
             return 0;
         }
         if (p.positionalArguments().size() != 1)

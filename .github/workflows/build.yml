@@ -1,4 +1,4 @@
-name: Build and test
+name: Desktop C++ build and release
 on:
   push:
     branches: [main]
