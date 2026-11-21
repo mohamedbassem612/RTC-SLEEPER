@@ -18,6 +18,32 @@ pub struct PhoneCache {
     pub form: Value,
     pub state: Value,
     pub logs: String,
+    /// Sleep history kept on the phone, newer than what the laptop itself still remembers.
+    #[serde(default)]
+    pub history: Vec<Value>,
+}
+pub const MAX_HISTORY: usize = 200;
+/// Merges the laptop's recent sleep records into the phone's longer history, keyed by the time
+/// the sleep started. A record that gained its wake information replaces its earlier open form.
+pub fn merge_history(existing: &mut Vec<Value>, incoming: &[Value], cap: usize) {
+    for rec in incoming {
+        let Some(at) = rec["at"].as_u64() else {
+            continue;
+        };
+        match existing.iter().position(|r| r["at"].as_u64() == Some(at)) {
+            Some(i) => {
+                if !rec["woke_at"].is_null() || existing[i]["woke_at"].is_null() {
+                    existing[i] = rec.clone();
+                }
+            }
+            None => existing.push(rec.clone()),
+        }
+    }
+    existing.sort_by_key(|r| r["at"].as_u64().unwrap_or(0));
+    if existing.len() > cap {
+        let extra = existing.len() - cap;
+        existing.drain(..extra);
+    }
 }
 impl PhoneCache {
     /// Keeps only the newest part of the logs so the file stays small.
@@ -71,6 +97,7 @@ mod tests {
             form: json!({"sh":11,"sm":30}),
             state: json!({"status":"scheduled"}),
             logs: "line".into(),
+            history: vec![json!({"at":5})],
         };
         c.write(&path).unwrap();
         assert_eq!(PhoneCache::read(&path).unwrap(), Some(c));
@@ -92,5 +119,21 @@ mod tests {
         .capped();
         assert!(c.logs.len() <= MAX_LOG_BYTES);
         assert!(c.logs.chars().all(|ch| ch == 'ع'));
+    }
+    #[test]
+    fn history_merge_updates_dedupes_and_caps() {
+        let mut h = vec![];
+        merge_history(&mut h, &[json!({"at":10,"woke_at":null}), json!({"at":20,"woke_at":null})], 3);
+        assert_eq!(h.len(), 2);
+        // The same sleep arrives again, now closed: replaces, does not duplicate.
+        merge_history(&mut h, &[json!({"at":10,"woke_at":15,"wake":"alarm"})], 3);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0]["wake"], "alarm");
+        // An older open copy never overwrites a closed one.
+        merge_history(&mut h, &[json!({"at":10,"woke_at":null})], 3);
+        assert_eq!(h[0]["wake"], "alarm");
+        // Cap keeps the newest; records without a start time are ignored.
+        merge_history(&mut h, &[json!({"at":30}), json!({"at":40}), json!({"nope":1})], 3);
+        assert_eq!(h.iter().map(|r| r["at"].as_u64().unwrap()).collect::<Vec<_>>(), vec![20, 30, 40]);
     }
 }

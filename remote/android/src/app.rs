@@ -5,8 +5,8 @@ use jni::{
     objects::{JObject, JString, JValue},
     JNIEnv, JavaVM,
 };
-use rtc_remote_core::cache::PhoneCache;
-use rtc_remote_core::presence::{dur, presence, schedule_label};
+use rtc_remote_core::cache::{merge_history, PhoneCache, MAX_HISTORY};
+use rtc_remote_core::presence::{dur, presence, schedule_label, sleep_entry};
 use rtc_remote_core::{tailnet::TailNode, *};
 use serde_json::{json, Value};
 use std::{
@@ -190,6 +190,8 @@ struct Mobile {
     /// True while the numbers on screen came only from the saved copy.
     from_saved: bool,
     cache_dirty: bool,
+    /// Every sleep the laptop reported, kept on the phone (viewed in Settings).
+    history: Vec<Value>,
     last_saved: Instant,
     last_form: Value,
     phrase: String,
@@ -292,6 +294,7 @@ impl Mobile {
             data_epoch: None,
             from_saved: false,
             cache_dirty: false,
+            history: vec![],
             last_saved: Instant::now(),
             last_form: json!(null),
             phrase: String::new(),
@@ -351,6 +354,9 @@ impl Mobile {
             self.from_saved = true;
         }
         self.logs = c.logs;
+        self.history = c.history;
+        let incoming = self.state["history"].as_array().cloned().unwrap_or_default();
+        merge_history(&mut self.history, &incoming, MAX_HISTORY);
     }
     fn save_cache(&mut self) {
         self.cache_dirty = false;
@@ -364,6 +370,7 @@ impl Mobile {
                 form: self.form_value(),
                 state: self.state.clone(),
                 logs: self.logs.clone(),
+                history: self.history.clone(),
             }
             .write(&path);
         }
@@ -374,6 +381,7 @@ impl Mobile {
         }
         self.state = json!({});
         self.logs.clear();
+        self.history.clear();
         self.data_epoch = None;
         self.from_saved = false;
         self.seen_resume = None;
@@ -617,10 +625,21 @@ impl Mobile {
                         let was_lost = self
                             .last_ok
                             .is_some_and(|t| t.elapsed() >= Duration::from_secs(15));
+                        let by_system = v["history"]
+                            .as_array()
+                            .and_then(|h| h.last())
+                            .is_some_and(|r| r["source"] == "system");
                         if had_status {
                             if new_resume.is_some_and(|n| self.seen_resume.is_none_or(|o| n > o)) {
-                                self.banner =
-                                    Some(("Laptop woke up and is back online".into(), Instant::now()));
+                                self.banner = Some((
+                                    if by_system {
+                                        "Laptop woke up and is back online. It was put to sleep from the system, not by RTC Sleeper."
+                                    } else {
+                                        "Laptop woke up and is back online"
+                                    }
+                                    .into(),
+                                    Instant::now(),
+                                ));
                             } else if was_lost {
                                 self.banner =
                                     Some(("Laptop is back online".into(), Instant::now()));
@@ -630,6 +649,8 @@ impl Mobile {
                             self.seen_resume = new_resume;
                         }
                         self.state = v;
+                        let incoming = self.state["history"].as_array().cloned().unwrap_or_default();
+                        merge_history(&mut self.history, &incoming, MAX_HISTORY);
                         self.data_epoch = Some(now());
                         self.from_saved = false;
                         self.cache_dirty = true;
@@ -757,8 +778,26 @@ impl Mobile {
             ui.label("No laptop paired.");
         }
         ui.separator();
+        ui.heading("Sleep history");
+        if self.history.is_empty() {
+            ui.label("No sleeps recorded yet. Entries appear after the laptop sleeps and the phone reconnects.");
+        }
+        for rec in self.history.iter().rev().take(50) {
+            let (slept, woke, by) = sleep_entry(rec);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(slept);
+                ui.label(woke);
+                ui.label(by);
+            });
+        }
+        ui.label(format!("{} entries kept on this phone (up to {MAX_HISTORY}).", self.history.len()));
+        if !self.history.is_empty() && ui.button("Clear sleep history").clicked() {
+            self.history.clear();
+            self.cache_dirty = true;
+        }
+        ui.separator();
         ui.heading("Saved on this phone");
-        ui.label("The schedule fields, the last laptop status and the logs are kept on this phone so they stay visible while the laptop sleeps. The laptop holds the real schedule. Tailscale only carries the connection and stores nothing.");
+        ui.label("The schedule fields, the last laptop status, the sleep history and the logs are kept on this phone so they stay visible while the laptop sleeps. The laptop holds the real schedule. Tailscale only carries the connection and stores nothing.");
         if let Some(at) = self.data_epoch {
             ui.label(format!("Laptop data saved {} ago.", dur(now().saturating_sub(at))));
         }
@@ -903,7 +942,7 @@ impl eframe::App for Mobile {
                 if let Some((text,at))=&self.banner{if at.elapsed()<Duration::from_secs(30){ui.colored_label(egui::Color32::from_rgb(80,200,120),text);}}
                 if self.from_saved&&!online{if let Some(at)=self.data_epoch{ui.label(format!("Showing saved data from {} ago.",dur(now().saturating_sub(at))));}}
                 if heard{ui.label(format!("Schedule: {}",schedule_label(&status)));}
-                if let Some(w)=self.state["last_resume"].as_u64(){let mut t=format!("Last woke up: {} ago",dur(now().saturating_sub(w)));if let Some(sl)=self.state["last_sleep_at"].as_u64().filter(|sl|*sl<=w){t+=&format!(" (slept for {})",dur(w-sl));}ui.label(t);}
+                if let Some(rec)=self.history.last(){let (a,b,c)=sleep_entry(rec);ui.label("Last sleep");ui.label(a);ui.label(b);ui.label(c);}else if let Some(w)=self.state["last_resume"].as_u64(){ui.label(format!("Last woke up: {} ago",dur(now().saturating_sub(w))));}
                 if let Some(next)=self.state["next_sleep"].as_u64(){let seconds=next.saturating_sub(now());ui.label(format!("Will sleep in: {} h {} min {} s",seconds/3600,seconds/60%60,seconds%60));}
                 if let Some(message)=self.state["message"].as_str().filter(|s|!s.is_empty()){ui.label(message);}
                 if ui.add_enabled(!self.busy,egui::Button::new("Refresh status")).clicked(){self.command("status",json!({}));}

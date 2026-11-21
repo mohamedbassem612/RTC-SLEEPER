@@ -43,6 +43,11 @@ static QJsonObject request(QString op, QJsonObject payload = {}) {
              QJsonObject{
                  {"kind", "agent"}, {"name", "Test"}, {"source", "cli"}, {"model", "test-model"}}}};
 }
+static QJsonObject userRequest(QString op, QJsonObject payload, QString name = "User") {
+    return {{"op", op},
+            {"payload", payload},
+            {"actor", QJsonObject{{"kind", "user"}, {"name", name}, {"source", "cli"}, {"model", ""}}}};
+}
 static QJsonObject schedule(QJsonObject c = cfg(), bool replace = false) {
     return request("schedule", {{"config", c}, {"replace_alarm", replace}});
 }
@@ -186,6 +191,88 @@ class Tests : public QObject {
         e.resumed();
         QCOMPARE(e.state()["last_sleep_at"].toInteger(), h.clock - 50);
         QCOMPARE(e.state()["last_resume"].toInteger(), h.clock);
+    }
+    void sleepRecordNamesTheUserWhoScheduledIt() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(userRequest("schedule", {{"config", cfg()}, {"replace_alarm", false}}, "Android: Pixel"), 1000);
+        QVERIFY(!s["next_wake_text"].toString().isEmpty());
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        auto rec = e.state()["history"].toArray().at(0).toObject();
+        QCOMPARE(rec["source"].toString(), "scheduler");
+        QCOMPARE(rec["by"].toObject()["kind"].toString(), "user");
+        QCOMPARE(rec["by"].toObject()["name"].toString(), "Android: Pixel");
+        QCOMPARE(rec["expected_wake"].toInteger(), s["next_wake"].toInteger());
+        QCOMPARE(rec["expected_wake_text"].toString(), s["next_wake_text"].toString());
+        QVERIFY(rec["woke_at"].isNull());
+        // The pre-suspend hook that follows must not add a second record for the same sleep.
+        e.sleeping();
+        QCOMPARE(e.state()["history"].toArray().size(), 1);
+        h.clock = s["next_wake"].toInteger() + 20;
+        e.resumed();
+        rec = e.state()["history"].toArray().at(0).toObject();
+        QCOMPARE(rec["wake"].toString(), "alarm");
+        QCOMPARE(rec["woke_at"].toInteger(), h.clock);
+    }
+    void sleepRecordNamesTheAgent() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(schedule(), 1000); // agent "Test" / model "test-model"
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        auto by = e.state()["history"].toArray().at(0).toObject()["by"].toObject();
+        QCOMPARE(by["kind"].toString(), "agent");
+        QCOMPARE(by["name"].toString(), "Test");
+        QCOMPARE(by["model"].toString(), "test-model");
+    }
+    void sleepFromTheSystemIsRecordedAsSuch() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        // No schedule and no alarm: a lid close or menu suspend. Nobody can say when it ends.
+        e.sleeping();
+        auto rec = e.state()["history"].toArray().at(0).toObject();
+        QCOMPARE(rec["source"].toString(), "system");
+        QVERIFY(rec["by"].isNull());
+        QVERIFY(rec["expected_wake"].isNull());
+        h.clock += 600;
+        e.resumed();
+        rec = e.state()["history"].toArray().at(0).toObject();
+        QCOMPARE(rec["wake"].toString(), "manual");
+        // With a wake alarm already armed the end of the sleep is known, whoever started it.
+        auto s = e.control(userRequest("schedule", {{"config", cfg()}, {"replace_alarm", false}}), 1000);
+        e.sleeping();
+        rec = e.state()["history"].toArray().at(1).toObject();
+        QCOMPARE(rec["source"].toString(), "system");
+        QCOMPARE(rec["expected_wake"].toInteger(), s["next_wake"].toInteger());
+    }
+    void historyIsCappedAndSurvivesCancel() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        for (int i = 0; i < 25; ++i) {
+            e.sleeping();
+            h.clock += 60;
+            e.resumed();
+        }
+        QCOMPARE(e.state()["history"].toArray().size(), 20);
+        e.control(schedule(), 1000);
+        e.control(request("cancel"), 1000);
+        QCOMPARE(e.state()["history"].toArray().size(), 20);
+    }
+    void failedSuspendClosesTheRecord() {
+        QTemporaryDir dir;
+        FakeHost h;
+        Engine e(dir.path(), h);
+        auto s = e.control(schedule(), 1000);
+        h.clock = s["next_sleep"].toInteger();
+        e.tick();
+        h.clock += 200; // resume hook never ran
+        e.tick();
+        QCOMPARE(e.state()["history"].toArray().at(0).toObject()["wake"].toString(), "failed");
     }
     void manualSuspendBeforeDeadlineKeepsSchedule() {
         QTemporaryDir dir;

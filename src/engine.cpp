@@ -1,5 +1,6 @@
 #include "engine.h"
 #include <QDir>
+#include <QLocale>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -88,6 +89,46 @@ QJsonValue jsonAlarm(Alarm a) {
 Alarm alarmValue(QJsonValue v) {
     return v.isDouble() ? Alarm(v.toInteger()) : std::nullopt;
 }
+// Wall-clock text in the laptop's own time zone, so the phone never has to guess a zone or DST.
+QString clockText(qint64 epoch) {
+    return QLocale::c().toString(QDateTime::fromSecsSinceEpoch(epoch), "ddd d MMM, h:mm AP");
+}
+QJsonValue clockValue(const QJsonValue &v) {
+    return v.isDouble() ? QJsonValue(clockText(v.toInteger())) : QJsonValue(QJsonValue::Null);
+}
+// One entry per sleep: when, who caused it, when it should end and how it really ended.
+QJsonObject sleepRecord(qint64 now, const QString &source, const QJsonValue &by,
+                        const QJsonValue &expectedWake) {
+    return {{"at", now},
+            {"at_text", clockText(now)},
+            {"source", source}, // "scheduler" (this program) or "system" (anything else)
+            {"by", by},         // actor of the schedule for "scheduler", null for "system"
+            {"expected_wake", expectedWake},
+            {"expected_wake_text", clockValue(expectedWake)},
+            {"woke_at", QJsonValue::Null},
+            {"woke_text", QJsonValue::Null},
+            {"wake", QJsonValue::Null}};
+}
+QJsonArray appendRecord(QJsonArray history, const QJsonObject &record) {
+    history.append(record);
+    while (history.size() > 20)
+        history.removeFirst();
+    return history;
+}
+// Closes the newest open record. `reason` overrides the alarm/manual guess (e.g. "failed").
+void closeRecord(QJsonArray &history, qint64 now, const QString &reason = QString()) {
+    if (history.isEmpty())
+        return;
+    auto r = history.at(history.size() - 1).toObject();
+    if (!r["woke_at"].isNull())
+        return;
+    auto expected = r["expected_wake"];
+    r["woke_at"] = now;
+    r["woke_text"] = clockText(now);
+    r["wake"] = !reason.isEmpty() ? reason
+                : (expected.isDouble() && qAbs(now - expected.toInteger()) <= 120 ? "alarm" : "manual");
+    history[history.size() - 1] = r;
+}
 QJsonObject idleState() {
     QJsonObject s{{"version", 2},
                   {"status", "idle"},
@@ -96,6 +137,7 @@ QJsonObject idleState() {
     for (auto k : {"config", "next_sleep", "next_wake", "expected_alarm", "actual_alarm", "actor",
                    "cycle", "last_resume", "last_sleep_at", "trigger", "scheduled_at"})
         s[k] = QJsonValue::Null;
+    s["history"] = QJsonArray();
     return s;
 }
 QString run(const QString &p, const QStringList &args, int timeout) {
@@ -223,7 +265,9 @@ QJsonObject Engine::stateOrRecover() {
         return idleState();
     }
 }
-void Engine::save(QJsonObject s) {
+void Engine::save(QJsonObject &s) {
+    s["next_sleep_text"] = clockValue(s["next_sleep"]);
+    s["next_wake_text"] = clockValue(s["next_wake"]);
     s["updated"] = host_.now();
     QSaveFile f(root_ + "/state.json");
     if (!f.open(QIODevice::WriteOnly))
@@ -352,6 +396,7 @@ QJsonObject Engine::control(const QJsonObject &r, qint64 uid) {
             fresh["actual_alarm"] = s["actual_alarm"];
             fresh["last_resume"] = s["last_resume"];
             fresh["last_sleep_at"] = s["last_sleep_at"];
+            fresh["history"] = s["history"];
             save(fresh);
             s = fresh;
             event("schedule_removed", {{"actor", actor}});
@@ -415,6 +460,9 @@ void Engine::tick() {
             // queued, or the hook is missing). Do not stay locked in "sleeping" forever.
             auto at = s["trigger"].toObject()["at"].toInteger();
             if (host_.now() - at > 120) {
+                auto h = s["history"].toArray();
+                closeRecord(h, host_.now(), "failed");
+                s["history"] = h;
                 finish(s, "sleep_watchdog");
                 return;
             }
@@ -438,6 +486,8 @@ void Engine::tick() {
                     fail("RTC changed immediately before suspend.");
                 s["status"] = "sleeping";
                 s["last_sleep_at"] = now;
+                s["history"] = appendRecord(s["history"].toArray(),
+                                            sleepRecord(now, "scheduler", s["actor"], s["next_wake"]));
                 s["trigger"] = QJsonObject{
                     {"created_by", s["actor"]}, {"executed_by", systemActor()}, {"at", now}};
                 save(s);
@@ -446,6 +496,9 @@ void Engine::tick() {
                 try {
                     host_.suspend();
                 } catch (...) {
+                    auto h = s["history"].toArray();
+                    closeRecord(h, host_.now(), "failed");
+                    s["history"] = h;
                     clearOwned(s);
                     throw;
                 }
@@ -464,13 +517,36 @@ void Engine::tick() {
 void Engine::sleeping() {
     Lock lock(root_);
     auto s = stateOrRecover();
-    s["last_sleep_at"] = host_.now();
+    auto now = host_.now();
+    s["last_sleep_at"] = now;
+    if (s["status"] != "sleeping") {
+        // Suspend that did not come from this scheduler: lid, power button, desktop menu,
+        // systemctl or another tool. Who did it cannot be known; the wake time is known only if
+        // a wake alarm happens to be armed.
+        QJsonValue wake = QJsonValue::Null;
+        try {
+            auto alarm = host_.alarm();
+            if (alarm && *alarm > now)
+                wake = *alarm;
+        } catch (...) {
+        }
+        s["history"] = appendRecord(s["history"].toArray(), sleepRecord(now, "system", QJsonValue::Null, wake));
+        try {
+            event("system_sleep_observed", {{"result", "observed"}, {"expected_wake", wake}});
+        } catch (...) {
+        }
+    }
     save(s);
 }
 void Engine::resumed() {
     Lock lock(root_);
     auto s = stateOrRecover();
     auto status = s["status"].toString();
+    {
+        auto h = s["history"].toArray();
+        closeRecord(h, host_.now());
+        s["history"] = h;
+    }
     // Only a resume that follows the scheduled sleep (or one this engine triggered) completes
     // the cycle. A manual suspend before the sleep time must not cancel the schedule.
     bool due = status == "sleeping" ||
